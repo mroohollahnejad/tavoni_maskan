@@ -8,9 +8,10 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # ==============================
 # تنظیمات امنیتی و پایه
 # ==============================
-SECRET_KEY = 'django-insecure-bc%!5d@(l(@)kox^8xsmag4vo-n*z1we8*0ohy($p%bh(o-a1j'
+SECRET_KEY = os.environ.get('SECRET_KEY', 'fallback-secret-key')
+
 DEBUG = False
-ALLOWED_HOSTS = ['https://tavoni-maskan.onrender.com']  # در حالت توسعه خالی می‌ماند
+ALLOWED_HOSTS = ['https://tavoni_maskan.onrender.com']  # در حالت توسعه خالی می‌ماند
 
 # ==============================
 # اپلیکیشن‌ها
