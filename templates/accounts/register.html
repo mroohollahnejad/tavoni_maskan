@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ثبت‌نام کاربر جدید</title>
+
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+  <style>
+    body {
+      background: linear-gradient(135deg, #43C6AC, #191654);
+      height: 100vh;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      font-family: "Vazirmatn", sans-serif;
+    }
+    .register-card {
+      background: white;
+      border-radius: 1rem;
+      box-shadow: 0 0 20px rgba(0,0,0,0.15);
+      width: 100%;
+      max-width: 450px;
+      padding: 2rem;
+    }
+    .btn-success {
+      background-color: #43C6AC;
+      border: none;
+    }
+    .btn-success:hover {
+      background-color: #36a290;
+    }
+  </style>
+</head>
+
+<body>
+  <div class="register-card">
+    <h4 class="text-center mb-4">ثبت‌نام کاربر جدید</h4>
+
+    <form method="post">
+      {% csrf_token %}
+      {{ form.non_field_errors }}
+      <div class="mb-3">
+        <label for="id_username" class="form-label">نام کاربری</label>
+        {{ form.username }}
+      </div>
+      <div class="mb-3">
+        <label for="id_password1" class="form-label">رمز عبور</label>
+        {{ form.password1 }}
+      </div>
+      <div class="mb-3">
+        <label for="id_password2" class="form-label">تکرار رمز عبور</label>
+        {{ form.password2 }}
+      </div>
+
+      <button type="submit" class="btn btn-success w-100">ثبت‌نام</button>
+    </form>
+
+    <div class="text-center mt-3">
+      <a href="{% url 'login' %}" class="text-decoration-none">ورود به حساب</a>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>

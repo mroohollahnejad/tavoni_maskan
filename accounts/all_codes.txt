@@ -1,0 +1,1020 @@
+from django.shortcuts import render, redirect, get_object_or_404
+from django.contrib.auth.decorators import login_required, user_passes_test
+from django.contrib.auth.views import LoginView
+from django.contrib.auth import login
+from django.contrib import messages
+from django.contrib.auth.models import User
+from django.http import JsonResponse,HttpResponse
+from django.views.decorators.csrf import csrf_exempt
+from .models import Profile, Payment, ApprovedPaymentDate
+from .forms import ProfileForm, UserUpdateForm, PaymentForm
+import jdatetime
+from datetime import datetime
+from datetime import date
+import pandas as pd
+import openpyxl
+from .forms import MembersUploadForm
+from openpyxl import load_workbook
+from datetime import date
+import jdatetime
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+# ---------------------- تبدیل تاریخ شمسی یا میلادی به میلادی ----------------------
+def parse_date(date_str):
+    if not date_str:
+        return None
+    try:
+        jdate = jdatetime.datetime.strptime(date_str, "%Y-%m-%d")
+        return jdate.togregorian().date()
+    except Exception:
+        try:
+            return datetime.strptime(date_str, "%Y-%m-%d").date()
+        except Exception:
+            raise ValueError("فرمت تاریخ معتبر نیست (باید شمسی یا میلادی باشد).")
+
+# ---------------------- تبدیل میلادی به شمسی برای نمایش ----------------------
+def to_jalali(date):
+    if not date:
+        return ''
+    if isinstance(date, jdatetime.date):
+        return date.strftime("%Y-%m-%d")
+    return jdatetime.date.fromgregorian(date=date).strftime("%Y-%m-%d")
+
+# ---------------------- محاسبه امتیاز کل و داده‌های واریزی ----------------------
+def calculate_total_score(user):
+    payments = Payment.objects.filter(user=user).order_by('installment_number')
+    total_score = 0
+    payments_data = []
+    today = date.today()  # تاریخ امروز
+    
+    for p in payments:
+        if p.payment_date and p.due_date:
+            if p.payment_date > p.due_date:
+                diff_days = (today - p.payment_date).days
+            else:
+                diff_days = (today - p.due_date).days
+        else:
+            diff_days = 0
+        
+        score = (diff_days * float(p.amount)) / 100_000_000
+        total_score += score
+        
+        payments_data.append({
+            'id': p.id,
+            'installment_number': p.installment_number,
+            'amount': p.amount,
+            'payment_date': p.payment_date,
+            'payment_date_j': to_jalali(p.payment_date),
+            'due_date': p.due_date,
+            'due_date_j': to_jalali(p.due_date),
+            'diff_days': diff_days,
+            'score': score
+        })
+    return total_score, payments_data
+
+# ---------------------- داشبورد ----------------------
+@login_required
+def dashboard(request):
+    user = request.user
+    profile = Profile.objects.get_or_create(user=user)[0]
+    payments = Payment.objects.filter(user=user).order_by('installment_number')
+    approved_dates = ApprovedPaymentDate.objects.all()
+
+    total_score, payments_data = calculate_total_score(user)
+    approved_dates_list = {p.installment_number: p.due_date for p in approved_dates}
+
+    context = {
+        'user': user,
+        'profile': profile,
+        'payments': payments_data,
+        'approved_dates': approved_dates_list,
+        'installments': [d.installment_number for d in ApprovedPaymentDate.objects.all().order_by('installment_number')],
+        'active_tab': request.GET.get('tab', 'personal'),
+        'total_score': total_score
+    }
+    return render(request, 'accounts/dashboard.html', context)
+
+# ---------------------- AJAX ثبت واریزی ----------------------
+@csrf_exempt
+@login_required
+def payment_create_ajax(request):
+    if request.method == 'POST':
+        try:
+            installment = int(request.POST.get('installment_number'))
+            amount = int(request.POST.get('amount'))
+            payment_date = parse_date(request.POST.get('payment_date'))
+            due_date_obj = ApprovedPaymentDate.objects.filter(installment_number=installment).first()
+            due_date_val = due_date_obj.due_date if due_date_obj else None
+
+            payment = Payment.objects.create(
+                user=request.user,
+                installment_number=installment,
+                amount=amount,
+                payment_date=payment_date,
+                due_date=due_date_val
+            )
+
+            total_score, _ = calculate_total_score(request.user)
+
+            return JsonResponse({
+                'status': 'success',
+                'message': '✅ واریزی ثبت شد',
+                'payment': {
+                    'id': payment.id,
+                    'installment_number': payment.installment_number,
+                    'amount': payment.amount,
+                    'payment_date': to_jalali(payment.payment_date),
+                    'due_date': to_jalali(payment.due_date)
+                },
+                'total_score': total_score
+            })
+        except Exception as e:
+            return JsonResponse({'status': 'error', 'message': str(e)})
+    return JsonResponse({'status': 'error', 'message': 'درخواست نامعتبر ❌'})
+
+# ---------------------- AJAX ویرایش واریزی ----------------------
+@csrf_exempt
+@login_required
+def payment_edit_ajax(request, pk):
+    if request.method == 'POST':
+        try:
+            payment = get_object_or_404(Payment, pk=pk, user=request.user)
+            field = request.POST.get('field')
+            value = request.POST.get('value')
+
+            if field == 'installment_number':
+                payment.installment_number = int(value)
+                due_date_obj = ApprovedPaymentDate.objects.filter(installment_number=value).first()
+                payment.due_date = due_date_obj.due_date if due_date_obj else None
+            elif field == 'amount':
+                payment.amount = int(value)
+            elif field == 'payment_date':
+                payment.payment_date = parse_date(value)
+
+            payment.save()
+            total_score, _ = calculate_total_score(request.user)
+
+            return JsonResponse({
+                'status': 'success',
+                'message': '✅ ویرایش انجام شد',
+                'payment_date': to_jalali(payment.payment_date),
+                'due_date': to_jalali(payment.due_date),
+                'total_score': total_score
+            })
+        except Exception as e:
+            return JsonResponse({'status': 'error', 'message': str(e)})
+    return JsonResponse({'status': 'error', 'message': 'درخواست نامعتبر ❌'})
+
+# ---------------------- AJAX حذف واریزی ----------------------
+@csrf_exempt
+@login_required
+def payment_delete_ajax(request, pk):
+    if request.method == 'POST':
+        payment = get_object_or_404(Payment, pk=pk, user=request.user)
+        payment.delete()
+        total_score, _ = calculate_total_score(request.user)
+        return JsonResponse({'status': 'success', 'message': '🗑️ واریزی حذف شد', 'total_score': total_score})
+    return JsonResponse({'status': 'error', 'message': 'درخواست نامعتبر ❌'})
+
+# ---------------------- AJAX داده‌های تب امتیاز ----------------------
+@login_required
+def score_ajax(request):
+    total_score, payments_data = calculate_total_score(request.user)
+    payments_json = [
+        {
+            'installment_number': p['installment_number'],
+            'amount': f"{p['amount']:,}",
+            'payment_date': p['payment_date_j'],
+            'due_date': p['due_date_j'],
+            'diff_days': p['diff_days'],
+            'score': round(p['score'], 2)
+        } for p in payments_data
+    ]
+    return JsonResponse({'total_score': total_score, 'payments': payments_json})
+
+# ---------------------- ویرایش پروفایل ----------------------
+@login_required
+def profile_edit(request):
+    profile, _ = Profile.objects.get_or_create(user=request.user)
+    if request.method == 'POST':
+        user_form = UserUpdateForm(request.POST, instance=request.user)
+        profile_form = ProfileForm(request.POST, request.FILES, instance=profile)
+        if user_form.is_valid() and profile_form.is_valid():
+            user_form.save()
+            profile_form.save()
+            messages.success(request, "✅ تغییرات ذخیره شد")
+            return redirect('dashboard')
+        else:
+            messages.error(request, "❌ خطا در فرم")
+    else:
+        user_form = UserUpdateForm(instance=request.user)
+        profile_form = ProfileForm(instance=profile)
+    return render(request, 'accounts/profile_edit.html', {
+        'user_form': user_form,
+        'profile_form': profile_form
+    })
+
+# ---------------------- ثبت‌نام کاربر ----------------------
+def register(request):
+    if request.method == 'POST':
+        username = request.POST.get('username')
+        password = request.POST.get('password')
+        password2 = request.POST.get('password2')
+        if password != password2:
+            messages.error(request, 'رمزها مطابقت ندارند ❌')
+            return redirect('register')
+        if User.objects.filter(username=username).exists():
+            messages.error(request, 'این نام کاربری قبلاً ثبت شده است ❌')
+            return redirect('register')
+        user = User.objects.create_user(username=username, password=password)
+        login(request, user)
+        messages.success(request, 'ثبت‌نام با موفقیت انجام شد ✅')
+        return redirect('dashboard')
+    return render(request, 'accounts/register.html')
+
+# ---------------------------------------------------------------------------
+
+
+
+def is_admin(u):
+    return u.is_staff or u.is_superuser
+
+
+
+# ---------- تولید فایل نمونه ----------
+def generate_sample_excel():
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Members"
+
+    headers = ["نام", "نام خانوادگی", "کد ملی", "شماره همراه", "ایمیل",
+               "شماره شناسنامه", "نوبت واریزی", "تاریخ واریز",
+               "مبلغ واریزی", "تاریخ مصوب"]
+    ws.append(headers)
+
+    for cell in ws[1]:
+        cell.font = openpyxl.styles.Font(bold=True)
+
+    sample_row = ["محمد", "روح‌الله‌نژاد", "۳۳۹۲۰۴۸۴۴۴","09121234567", "test@example.com",
+                  "123456", 1, "1404-01-15", 1000000, "1404-01-20"]
+    ws.append(sample_row)
+
+    return wb
+#------------------------------------------------------------------------------
+@login_required
+def download_sample_excel(request):
+    wb = generate_sample_excel()
+    response = HttpResponse(
+        content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    )
+    response['Content-Disposition'] = 'attachment; filename="sample_members.xlsx"'
+    wb.save(response)
+    return response
+
+#-------------------------------------------------------------------------------------
+# ---------------------- تبدیل تاریخ شمسی یا میلادی به میلادی ----------------------
+def parse_date(date_str):
+    """تبدیل تاریخ شمسی یا میلادی به datetime.date"""
+    if not date_str:
+        return None
+    if isinstance(date_str, datetime):
+        return date_str.date()
+    if isinstance(date_str, date):
+        return date_str
+    date_str = str(date_str).strip()
+    # بررسی فرمت شمسی (سال > 1300)
+    if '/' in date_str or '-' in date_str:
+        parts = date_str.replace('/', '-').split('-')
+        if len(parts) == 3:
+            y, m, d = map(int, parts)
+            if y > 1300:  # شمسی
+                import jdatetime
+                return jdatetime.date(y, m, d).togregorian()
+            else:  # میلادی
+                return date(y, m, d)
+    return None
+
+# ---------------------- آپلود فایل و پردازش ----------------------
+# ---------------------- آپلود فایل و پردازش پیشرفته ----------------------
+
+
+def fix_excel_date(value):
+    """
+    تنظیم تاریخ ورودی از اکسل
+    پشتیبانی از: datetime، date، رشته، مقدار خالی
+    """
+    if value is None:
+        return None
+
+    # اگر تاریخ واقعی اکسل باشد
+    if isinstance(value, (datetime.datetime, datetime.date)):
+        return value.date() if isinstance(value, datetime.datetime) else value
+
+    # اگر رشته باشد
+    value = str(value).strip()
+    if not value:
+        return None
+
+    parsed = parse_date(value)
+    return parsed
+
+
+
+
+# ---------------------- آپلود و پردازش اکسل ----------------------
+
+def upload_members_and_payments(request):
+    if request.method == "POST" and request.FILES.get("excel_file"):
+        excel_file = request.FILES["excel_file"]
+
+        try:
+            wb = load_workbook(excel_file, data_only=True)
+            sheet = wb.active
+        except Exception:
+            messages.error(request, "❌ خطا در باز کردن فایل. لطفاً فایل اکسل معتبر بارگذاری کنید.")
+            return redirect("upload_members_and_payments")
+
+        headers = [str(cell.value).strip() if cell.value else "" for cell in sheet[1]]
+        expected_headers = [
+            "نام", "نام خانوادگی", "کد ملی", "شماره همراه", "ایمیل",
+            "شماره شناسنامه", "نوبت واریزی", "تاریخ واریز", "مبلغ واریزی"
+        ]
+
+        missing_headers = [h for h in expected_headers if h not in headers]
+        if missing_headers:
+            messages.error(request, f"❌ ستون‌های زیر در فایل وجود ندارند: {', '.join(missing_headers)}")
+            return redirect("upload_members_and_payments")
+
+        added_users = 0
+        added_payments = 0
+
+        for row in sheet.iter_rows(min_row=2, values_only=True):
+            data = dict(zip(headers, row))
+
+            first_name = str(data.get("نام", "")).strip()
+            last_name = str(data.get("نام خانوادگی", "")).strip()
+            national_code = str(data.get("کد ملی", "")).strip()
+            phone = str(data.get("شماره همراه", "")).strip()
+            email = str(data.get("ایمیل", "")).strip()
+            birth_certificate = str(data.get("شماره شناسنامه", "")).strip()
+
+            installment_number = data.get("نوبت واریزی")
+            payment_date = parse_date(data.get("تاریخ واریز"))
+            amount = data.get("مبلغ واریزی")
+
+            if not national_code:
+                continue
+
+            # ---------------------- ایجاد/آپدیت کاربر ----------------------
+            user, created = User.objects.get_or_create(username=national_code)
+
+            if created:
+                user.first_name = first_name
+                user.last_name = last_name
+                user.email = email
+                user.set_password(national_code)  # ✅ رمز عبور = کد ملی
+                user.save()
+                added_users += 1
+            else:
+                updated = False
+                if user.first_name != first_name:
+                    user.first_name = first_name
+                    updated = True
+                if user.last_name != last_name:
+                    user.last_name = last_name
+                    updated = True
+                if user.email != email:
+                    user.email = email
+                    updated = True
+                if updated:
+                    user.save()
+
+            # ---------------------- ایجاد/آپدیت پروفایل ----------------------
+            Profile.objects.update_or_create(
+                user=user,
+                defaults={
+                    "phone_number": phone,
+                    "birth_certificate": birth_certificate,
+                    "national_code": national_code,
+                },
+            )
+
+            # ---------------------- ثبت واریزی با جلوگیری از تکراری ----------------------
+            if installment_number and payment_date and amount:
+                installment_number = int(installment_number)
+
+                # جلوگیری از ثبت رکورد تکراری کامل
+                exists_same = Payment.objects.filter(
+                    user=user,
+                    installment_number=installment_number,
+                    payment_date=payment_date,
+                    amount=amount
+                ).exists()
+
+                if exists_same:
+                    continue  # رکورد تکراری → ثبت نشود
+
+                # تاریخ مصوب از مدیریت گرفته می‌شود
+                approved_date_obj, _ = ApprovedPaymentDate.objects.get_or_create(
+                    installment_number=installment_number,
+                    defaults={"due_date": None},
+                )
+
+                Payment.objects.create(
+                    user=user,
+                    installment_number=installment_number,
+                    amount=amount,
+                    payment_date=payment_date,
+                    due_date=approved_date_obj.due_date
+                )
+                added_payments += 1
+
+        msg = (
+            f"✅ فایل با موفقیت پردازش شد. "
+            f"{added_users} کاربر جدید، "
+            f"{added_payments} رکورد واریزی ثبت شد."
+        )
+        messages.success(request, msg)
+        return redirect("upload_members_and_payments")
+
+    return render(request, "accounts/upload_members_and_payments.html")
+
+
+
+# ---------------------- ورود کاربر ----------------------
+class CustomLoginView(LoginView):
+    template_name = 'accounts/login.html'
+    def form_valid(self, form):
+        messages.success(self.request, f"خوش آمدید {self.request.user.username} 🌷")
+        return super().form_valid(form)
+
+
+
+from django.urls import path
+from django.contrib.auth.views import LogoutView, PasswordChangeView
+from .views import (
+    CustomLoginView, dashboard, profile_edit,
+    payment_create_ajax, payment_edit_ajax, payment_delete_ajax,
+    score_ajax, upload_members_and_payments, download_sample_excel
+)
+
+urlpatterns = [
+    # ----------------- صفحات اصلی -----------------
+    path('', dashboard, name='dashboard'),
+    path('dashboard/', dashboard, name='dashboard'),
+
+    # صفحه ورود
+    path('login/', CustomLoginView.as_view(), name='login'),
+
+    # خروج از حساب
+    path('logout/', LogoutView.as_view(next_page='login'), name='logout'),
+
+    # ویرایش پروفایل
+    path('profile/edit/', profile_edit, name='profile_edit'),
+
+    # تغییر رمز عبور
+    path(
+        'password_change/',
+        PasswordChangeView.as_view(
+            template_name='accounts/password_change.html',
+            success_url='/dashboard/'
+        ),
+        name='password_change'
+    ),
+
+    # ----------------- مسیرهای AJAX -----------------
+    path('payments/create/', payment_create_ajax, name='payment_create_ajax'),
+    path('payments/<int:pk>/edit/', payment_edit_ajax, name='payment_edit_ajax'),
+    path('payments/<int:pk>/delete/', payment_delete_ajax, name='payment_delete_ajax'),
+    path('payments/score/', score_ajax, name='score_ajax'),
+
+    # ----------------- آپلود اکسل -----------------
+    path('upload-members/', upload_members_and_payments, name='upload_members_and_payments'),
+    path('download-sample-excel/', download_sample_excel, name='download_sample_excel'),
+]
+
+
+
+from django.db import models
+from django.contrib.auth.models import User
+from django.db.models.signals import post_save
+from django.dispatch import receiver
+from django_jalali.db import models as jmodels  # برای تاریخ شمسی
+
+
+# مدل پروفایل کاربر
+class Profile(models.Model):
+    user = models.OneToOneField(User, on_delete=models.CASCADE)
+    login_count = models.IntegerField(default=0)
+
+    # اطلاعات شخصی
+    first_name = models.CharField(max_length=50, blank=True, verbose_name="نام")
+    last_name = models.CharField(max_length=50, blank=True, verbose_name="نام خانوادگی")
+    national_code = models.CharField(max_length=10, blank=True, verbose_name="شماره ملی")
+    birth_certificate = models.CharField(max_length=10, blank=True, verbose_name="شماره شناسنامه")
+    phone_number = models.CharField(max_length=11, blank=True, verbose_name="شماره همراه")
+    birth_date = jmodels.jDateField(blank=True, null=True, verbose_name="تاریخ تولد (شمسی)")
+    birth_place = models.CharField(max_length=100, blank=True, verbose_name="محل تولد")
+
+    # عکس پروفایل
+    image = models.ImageField(upload_to='profile_pics/', default='default.jpg')
+
+    def __str__(self):
+        return f"{self.user.username} Profile"
+
+
+# مدل واریزی‌ها (قابل ثبت چندبار برای هر نوبت)
+PAYMENT_CHOICES = [(i, f"نوبت واریزی {i}") for i in range(1, 11)]
+
+class Payment(models.Model):
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='payments')
+    installment_number = models.IntegerField(choices=PAYMENT_CHOICES, verbose_name="نوبت واریز")
+    amount = models.DecimalField(max_digits=12, decimal_places=2, verbose_name="مبلغ واریزی")
+    payment_date = jmodels.jDateField(verbose_name="تاریخ واریز (شمسی)")
+    due_date = models.DateField(blank=True, null=True, verbose_name="تاریخ سررسید اعلامی تعاونی")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['installment_number', 'payment_date']
+        verbose_name = "واریز"
+        verbose_name_plural = "واریزی‌ها"
+
+    def __str__(self):
+        return f"{self.user.username} - نوبت {self.installment_number} - مبلغ {self.amount}"
+
+
+# تاریخ اعلامی واریزی توسط تعاونی
+class ApprovedPaymentDate(models.Model):
+    installment_number = models.PositiveSmallIntegerField(unique=True)
+    due_date = models.DateField()
+
+    class Meta:
+        ordering = ['installment_number']
+
+    def __str__(self):
+        return f"نوبت {self.installment_number} - {self.due_date}"
+
+
+# سیگنال‌های ایجاد خودکار پروفایل
+@receiver(post_save, sender=User)
+def create_profile(sender, instance, created, **kwargs):
+    if created:
+        Profile.objects.create(user=instance)
+
+@receiver(post_save, sender=User)
+def save_profile(sender, instance, **kwargs):
+    if hasattr(instance, 'profile'):
+        instance.profile.save()
+
+
+from django import forms
+from django.contrib.auth.models import User
+from .models import Profile
+import jdatetime
+from datetime import date
+from .models import Payment, ApprovedPaymentDate
+
+
+class UserUpdateForm(forms.ModelForm):
+    class Meta:
+        model = User
+        fields = ['first_name', 'last_name', 'email']
+        widgets = {
+            'first_name': forms.TextInput(attrs={'class': 'form-control', 'placeholder': 'نام'}),
+            'last_name': forms.TextInput(attrs={'class': 'form-control', 'placeholder': 'نام خانوادگی'}),
+            'email': forms.EmailInput(attrs={'class': 'form-control', 'placeholder': 'ایمیل'}),
+        }
+
+
+class ProfileForm(forms.ModelForm):
+    class Meta:
+        model = Profile
+        fields = [
+            'first_name', 'last_name', 'national_code',
+            'birth_certificate', 'phone_number', 'birth_date', 'birth_place'
+        ]
+        widgets = {
+            'first_name': forms.TextInput(attrs={'class': 'form-control', 'placeholder': 'نام'}),
+            'last_name': forms.TextInput(attrs={'class': 'form-control', 'placeholder': 'نام خانوادگی'}),
+            'national_code': forms.TextInput(attrs={'class': 'form-control', 'placeholder': 'شماره ملی'}),
+            'birth_certificate': forms.TextInput(attrs={'class': 'form-control', 'placeholder': 'شماره شناسنامه'}),
+            'phone_number': forms.TextInput(attrs={'class': 'form-control', 'placeholder': 'شماره همراه'}),
+            'birth_date': forms.TextInput(attrs={'class': 'form-control', 'placeholder': 'تاریخ تولد شمسی (مثلاً 1402-07-20)'}),
+            'birth_place': forms.TextInput(attrs={'class': 'form-control', 'placeholder': 'محل تولد'}),
+        }
+
+
+
+class MembersUploadForm(forms.Form):
+    file = forms.FileField(label="انتخاب فایل Excel اعضا و پرداخت‌ها")
+
+
+class PaymentForm(forms.ModelForm):
+    payment_date = forms.CharField(label="تاریخ واریز", widget=forms.TextInput(attrs={'class':'form-control'}))
+    due_date = forms.CharField(label="تاریخ مصوب", required=False, widget=forms.TextInput(attrs={'class':'form-control','readonly':'readonly'}))
+    installment_number = forms.ChoiceField(label="نوبت واریزی", widget=forms.Select(attrs={'class':'form-select'}))
+
+    class Meta:
+        model = Payment
+        fields = ['installment_number','due_date','amount','payment_date']
+
+    def __init__(self,*args,**kwargs):
+        super().__init__(*args,**kwargs)
+        approved_dates = ApprovedPaymentDate.objects.all()
+        if approved_dates.exists():
+            self.fields['installment_number'].choices = [(p.installment_number,f"نوبت {p.installment_number}") for p in approved_dates]
+        else:
+            self.fields['installment_number'].choices = [(i,f"نوبت {i}") for i in range(1,13)]
+
+        if self.instance and self.instance.pk:
+            try:
+                due = ApprovedPaymentDate.objects.get(installment_number=self.instance.installment_number)
+                self.fields['due_date'].initial = due.due_date
+            except ApprovedPaymentDate.DoesNotExist:
+                self.fields['due_date'].initial = ''
+
+    def clean_payment_date(self):
+        date_str = self.cleaned_data['payment_date'].strip()
+        try:
+            if '/' in date_str and int(date_str.split('/')[0])>1300:
+                jdate = jdatetime.date.fromisoformat(date_str.replace('/','-'))
+                return jdate.togregorian()
+            y,m,d = map(int,date_str.replace('/','-').split('-'))
+            return date(y,m,d)
+        except:
+            raise forms.ValidationError("تاریخ معتبر نیست")
+
+    def clean(self):
+        cleaned_data = super().clean()
+        installment = int(cleaned_data.get('installment_number'))
+        try:
+            due = ApprovedPaymentDate.objects.get(installment_number=installment)
+            cleaned_data['due_date'] = due.due_date
+        except ApprovedPaymentDate.DoesNotExist:
+            cleaned_data['due_date'] = ''
+        return cleaned_data
+
+
+from django.contrib import admin
+from .models import ApprovedPaymentDate
+
+@admin.register(ApprovedPaymentDate)
+class ApprovedPaymentDateAdmin(admin.ModelAdmin):
+    list_display = ('installment_number', 'due_date')
+    list_editable = ('due_date',)
+    ordering = ('installment_number',)
+
+
+{% load static %}
+{% load humanize %}
+{% load jformat %}
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>داشبورد کاربر</title>
+
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+<script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+
+<!-- Persian Datepicker -->
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/persian-datepicker@1.2.0/dist/css/persian-datepicker.min.css">
+<script src="https://cdn.jsdelivr.net/npm/persian-date@1.1.0/dist/persian-date.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/persian-datepicker@1.2.0/dist/js/persian-datepicker.min.js"></script>
+
+<style>
+body {
+  background: linear-gradient(135deg, #5b9bd5, #2b5797);
+  font-family: "Vazirmatn", sans-serif;
+  color: #fff;
+  min-height: 100vh;
+  padding: 20px 0;
+}
+.container { max-width: 1000px; }
+.card {
+  background: rgba(255, 255, 255, 0.95);
+  border-radius: 20px;
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.1);
+  padding: 2rem;
+}
+.table th {
+  background: linear-gradient(90deg, #007bff, #00bfff);
+  color: #fff;
+  font-weight: bold;
+}
+.table td { color: #000; }
+.table-hover tbody tr:hover { background-color: rgba(0, 123, 255, 0.1); }
+.btn-edit { background-color: #00bfff; border: none; color: #fff; font-weight: bold; transition: 0.3s; }
+.btn-edit:hover { background-color: #0099cc; }
+.btn-logout { background-color: #e74c3c; border: none; color: #fff; font-weight: bold; }
+.profile-header img { box-shadow: 0 0 10px rgba(0, 123, 255, 0.5); }
+.info-item { background: rgba(0, 123, 255, 0.1); padding: 10px; border-radius: 10px; margin-bottom: 8px; display: flex; justify-content: space-between; flex-wrap: wrap; }
+.nav-tabs .nav-link { cursor: pointer; }
+@media(max-width:576px){ .info-item { flex-direction: column; align-items: flex-start; } }
+</style>
+</head>
+<body>
+
+<div class="container">
+<div class="card">
+  <div class="profile-header text-center mb-3">
+    {% if profile.image %}
+      <img src="{{ profile.image.url }}" class="rounded-circle border border-info mb-2" width="120" height="120">
+    {% else %}
+      <img src="{% static 'default.jpg' %}" width="120" height="120">
+    {% endif %}
+    <h4 class="mt-2 text-primary">👋 خوش آمدی {{ user.username }}</h4>
+  </div>
+
+  <!-- تب‌ها -->
+  <ul class="nav nav-tabs mb-3 flex-wrap">
+    <li class="nav-item"><button class="nav-link {% if active_tab == 'personal' %}active{% endif %}" data-bs-toggle="tab" data-bs-target="#personal">اطلاعات هویتی</button></li>
+    <li class="nav-item"><button class="nav-link {% if active_tab == 'financial' %}active{% endif %}" data-bs-toggle="tab" data-bs-target="#financial">اطلاعات مالی</button></li>
+    <li class="nav-item"><button class="nav-link {% if active_tab == 'score' %}active{% endif %}" data-bs-toggle="tab" data-bs-target="#score">امتیاز عضو</button></li>
+  </ul>
+
+  <div class="tab-content">
+    <!-- تب اطلاعات هویتی -->
+    <div class="tab-pane fade {% if active_tab == 'personal' %}show active{% endif %}" id="personal">
+      <div class="info-item"><strong>نام:</strong> <span>{{ user.first_name|default:"-" }}</span></div>
+      <div class="info-item"><strong>نام خانوادگی:</strong> <span>{{ user.last_name|default:"-" }}</span></div>
+      <div class="info-item"><strong>ایمیل:</strong> <span>{{ user.email|default:"-" }}</span></div>
+      <div class="info-item"><strong>شماره ملی:</strong> <span>{{ profile.national_code|default:"-" }}</span></div>
+      <div class="info-item"><strong>شماره شناسنامه:</strong> <span>{{ profile.birth_certificate|default:"-" }}</span></div>
+      <div class="info-item"><strong>شماره همراه:</strong> <span>{{ profile.phone_number|default:"-" }}</span></div>
+      <div class="info-item"><strong>تاریخ تولد:</strong> <span>{{ profile.birth_date|default_if_none:"-"|jformat:"%Y-%m-%d" }}</span></div>
+      <div class="info-item"><strong>محل تولد:</strong> <span>{{ profile.birth_place|default:"-" }}</span></div>
+
+      <div class="text-center mt-4 d-flex flex-column gap-2">
+        <a href="{% url 'profile_edit' %}" class="btn btn-edit w-100">✏️ ویرایش پروفایل</a>
+        <form method="post" action="{% url 'logout' %}">{% csrf_token %}
+          <button type="submit" class="btn btn-logout w-100">🚪 خروج</button>
+        </form>
+      </div>
+    </div>
+
+    <!-- تب اطلاعات مالی -->
+    <div class="tab-pane fade {% if active_tab == 'financial' %}show active{% endif %}" id="financial">
+      <form id="paymentForm" class="payment-form mt-3">
+        {% csrf_token %}
+        <div class="row g-3">
+          <div class="col-md-4">
+            <label>نوبت واریزی</label>
+            <select name="installment_number" id="id_installment_number" class="form-select">
+              {% for i in installments %}
+                <option value="{{ i }}">نوبت {{ i }}</option>
+              {% endfor %}
+            </select>
+          </div>
+          <div class="col-md-4">
+            <label>مبلغ (ریال)</label>
+            <input type="number" name="amount" class="form-control" required min="1">
+          </div>
+          <div class="col-md-4">
+            <label>تاریخ واریز</label>
+            <input type="text" id="payment_date" name="payment_date" class="form-control" placeholder="YYYY-MM-DD" required>
+          </div>
+          <div class="col-md-4 mt-3">
+            <label>تاریخ مصوب واریزی</label>
+            <input type="text" id="id_due_date" name="due_date" class="form-control" readonly>
+          </div>
+        </div>
+        <div class="text-center mt-3">
+          <button type="submit" class="btn btn-edit w-50">💾 ثبت واریزی</button>
+        </div>
+      </form>
+
+      <div id="alertBox" class="mt-3"></div>
+
+      <div class="table-responsive mt-3">
+        <table class="table table-hover" id="paymentsTable">
+          <thead>
+            <tr>
+              <th>نوبت</th>
+              <th>مبلغ</th>
+              <th>تاریخ واریز</th>
+              <th>تاریخ مصوب</th>
+              <th>عملیات</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for p in payments %}
+              <tr data-id="{{ p.id }}">
+                <td class="editable" data-field="installment_number">{{ p.installment_number }}</td>
+                <td class="editable" data-field="amount">{{ p.amount|intcomma }}</td>
+                <td class="editable" data-field="payment_date">{{ p.payment_date_j }}</td>
+                <td>{{ p.due_date_j }}</td>
+                <td><button class="btn btn-sm btn-danger delete-btn">حذف</button></td>
+              </tr>
+            {% empty %}
+              <tr><td colspan="5" class="text-center text-warning">هنوز واریزی ثبت نشده است</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- تب امتیاز -->
+    <div class="tab-pane fade {% if active_tab == 'score' %}show active{% endif %}" id="score">
+      <div class="text-center mt-4">
+        <h5 class="text-primary fw-bold">🎯 امتیاز کل: <span id="totalScore">{{ total_score|floatformat:2 }}</span></h5>
+      </div>
+
+      <div class="table-responsive mt-4">
+        <table class="table table-striped table-bordered text-center align-middle" id="scoreTable">
+          <thead class="table-primary">
+            <tr>
+              <th>نوبت</th>
+              <th>مبلغ واریزی</th>
+              <th>تاریخ واریز</th>
+              <th>تاریخ مصوب</th>
+              <th>اختلاف روز</th>
+              <th>امتیاز</th>
+            </tr>
+          </thead>
+          <tbody id="scoreTableBody">
+            {% for p in payments %}
+              <tr>
+                <td>{{ p.installment_number }}</td>
+                <td>{{ p.amount|intcomma }}</td>
+                <td>{{ p.payment_date_j }}</td>
+                <td>{{ p.due_date_j }}</td>
+                <td>{{ p.diff_days }}</td>
+                <td>{{ p.score|floatformat:2 }}</td>
+              </tr>
+            {% empty %}
+              <tr><td colspan="6" class="text-center text-muted">در حال محاسبه...</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+</div>
+
+<script>
+$(document).ready(function() {
+  const approvedDates = {
+    {% for k,v in approved_dates.items %}
+      '{{ k }}': '{{ v|default_if_none:""|jformat:"%Y-%m-%d" }}',
+    {% endfor %}
+  };
+  const csrfToken = '{{ csrf_token }}';
+
+  $("#payment_date").persianDatepicker({
+    format: "YYYY-MM-DD", initialValue: false, autoClose: true, calendarType: "persian"
+  });
+
+  $('#id_installment_number').on('change', function(){
+    const val = $(this).val();
+    $('#id_due_date').val(approvedDates[val] || '');
+  }).trigger('change');
+
+  // 🔹 تابع بروزرسانی تب امتیاز
+  function updateScoreTab() {
+    $.get("{% url 'score_ajax' %}", function (data) {
+      $("#totalScore").text(data.total_score.toFixed(2));
+      const tbody = $("#scoreTableBody");
+      tbody.empty();
+      data.payments.forEach(p => {
+        const row = `<tr>
+          <td>${p.installment_number}</td>
+          <td>${p.amount}</td>
+          <td>${p.payment_date}</td>
+          <td>${p.due_date}</td>
+          <td>${p.diff_days}</td>
+          <td>${p.score}</td>
+        </tr>`;
+        tbody.append(row);
+      });
+    });
+  }
+
+  // ثبت واریزی
+  $('#paymentForm').on('submit', function (e) {
+    e.preventDefault();
+    $.ajax({
+      type: 'POST',
+      url: "{% url 'payment_create_ajax' %}",
+      data: $(this).serialize(),
+      beforeSend: xhr => xhr.setRequestHeader("X-CSRFToken", csrfToken),
+      success: function (response) {
+        if (response.status === 'success') {
+          const p = response.payment;
+          const newRow = `<tr data-id="${p.id}">
+              <td class="editable" data-field="installment_number">${p.installment_number}</td>
+              <td class="editable" data-field="amount">${p.amount}</td>
+              <td class="editable" data-field="payment_date">${p.payment_date}</td>
+              <td>${p.due_date}</td>
+              <td><button class="btn btn-sm btn-danger delete-btn">حذف</button></td>
+            </tr>`;
+          $('#paymentsTable tbody').append(newRow);
+          updateScoreTab(); // 🔹 تب امتیاز بلافاصله بروزرسانی شود
+        } else alert(response.message);
+      }
+    });
+  });
+
+  // حذف
+  $(document).on('click', '.delete-btn', function () {
+    const row = $(this).closest('tr');
+    const id = row.data('id');
+    if (!confirm('آیا از حذف این واریزی مطمئن هستید؟')) return;
+    $.post("{% url 'payment_delete_ajax' pk=0 %}".replace('0', id),
+      { csrfmiddlewaretoken: csrfToken },
+      function (response) {
+        if (response.status === 'success') { row.remove(); updateScoreTab(); }
+        else alert(response.message);
+      });
+  });
+
+  // ویرایش
+  $(document).on('click', '.editable', function () {
+    const td = $(this);
+    const oldValue = td.text().trim();
+    const field = td.data('field');
+    const id = td.closest('tr').data('id');
+    if (td.find('input').length) return;
+    const input = $('<input type="text" class="form-control form-control-sm">').val(oldValue);
+    td.empty().append(input).focus();
+
+    input.on('blur keydown', function (e) {
+      if (e.type === 'blur' || e.key === 'Enter') {
+        const newValue = input.val().trim();
+        if (newValue && newValue !== oldValue) {
+          $.post("{% url 'payment_edit_ajax' pk=0 %}".replace('0', id),
+            { field, value: newValue, csrfmiddlewaretoken: csrfToken },
+            function (response) {
+              if (response.status === 'success') { td.text(newValue); updateScoreTab(); }
+              else td.text(oldValue);
+            });
+        } else td.text(oldValue);
+      }
+    });
+  });
+});
+</script>
+
+</body>
+</html>
+
+
+{% extends "base.html" %}
+{% load static %}
+
+{% block content %}
+<div class="container mt-5">
+    <h2 class="mb-4 text-center">مدیریت اعضا و واریزی‌ها</h2>
+
+    <!-- پیام‌ها -->
+    {% if messages %}
+        {% for message in messages %}
+            <div class="alert {% if message.tags %}alert-{{ message.tags }}{% else %}alert-info{% endif %} alert-dismissible fade show" role="alert">
+                {{ message|safe }}
+                <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+            </div>
+        {% endfor %}
+    {% endif %}
+
+    <div class="row">
+        <!-- کارت دانلود فایل نمونه -->
+        <div class="col-md-6 mb-4">
+            <div class="card shadow-sm">
+                <div class="card-body text-center">
+                    <h5 class="card-title">فایل نمونه اکسل</h5>
+                    <p class="card-text">برای آپلود صحیح اعضا و واریزی‌ها از فایل نمونه استفاده کنید.</p>
+                    <a href="{% url 'download_sample_excel' %}" class="btn btn-success">
+                        دانلود فایل نمونه
+                    </a>
+                </div>
+            </div>
+        </div>
+
+        <!-- کارت آپلود فایل -->
+        <div class="col-md-6 mb-4">
+            <div class="card shadow-sm">
+                <div class="card-body">
+                    <h5 class="card-title text-center">آپلود فایل اعضا و واریزی‌ها</h5>
+                    <form method="post" enctype="multipart/form-data">
+                        {% csrf_token %}
+                        <div class="mb-3">
+                            <label for="excel_file" class="form-label">انتخاب فایل اکسل</label>
+                            <input type="file" name="excel_file" id="excel_file" class="form-control" required>
+                        </div>
+                        <div class="d-grid">
+                            <button type="submit" class="btn btn-primary">آپلود و پردازش</button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+{% endblock %}

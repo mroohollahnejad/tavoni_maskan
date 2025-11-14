@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ویرایش پروفایل</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+  <style>
+    body {
+      background: linear-gradient(135deg, #43C6AC, #191654);
+      min-height: 100vh;
+      font-family: "Vazirmatn", sans-serif;
+      color: #fff;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      padding: 20px;
+    }
+    .card {
+      background: rgba(255, 255, 255, 0.15);
+      border-radius: 1rem;
+      backdrop-filter: blur(10px);
+      width: 100%;
+      max-width: 700px;
+      padding: 2rem;
+      box-shadow: 0 8px 20px rgba(0,0,0,0.3);
+    }
+    label { font-weight: bold; }
+    input, select, textarea {
+      background-color: rgba(255,255,255,0.9) !important;
+      color: #333 !important;
+      border: none !important;
+      border-radius: 0.5rem !important;
+      padding: 0.6rem !important;
+    }
+    .btn-save {
+      background-color: #fbd786;
+      color: #333;
+      font-weight: bold;
+      border: none;
+      transition: 0.3s;
+    }
+    .btn-save:hover { background-color: #ffd46b; }
+    .text-danger { font-size: 0.9rem; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h3 class="text-center mb-4">📝 ویرایش پروفایل</h3>
+
+    {% if user_form.errors or profile_form.errors %}
+      <div class="alert alert-danger">
+        لطفاً خطاهای زیر را بررسی کنید:
+      </div>
+    {% endif %}
+
+    <form method="post" enctype="multipart/form-data">
+      {% csrf_token %}
+      <div class="row g-3">
+        <!-- فیلدهای User -->
+        {% for field in user_form %}
+        <div class="col-md-6">
+          <label class="form-label">{{ field.label }}</label>
+          {{ field }}
+          {% if field.errors %}
+            <div class="text-danger">{{ field.errors }}</div>
+          {% endif %}
+        </div>
+        {% endfor %}
+
+        <!-- فیلدهای Profile (به جز first_name و last_name) -->
+        {% for field in profile_form %}
+          {% if field.name != "first_name" and field.name != "last_name" %}
+          <div class="col-md-6">
+            <label class="form-label">{{ field.label }}</label>
+            {{ field }}
+            {% if field.errors %}
+              <div class="text-danger">{{ field.errors }}</div>
+            {% endif %}
+          </div>
+          {% endif %}
+        {% endfor %}
+      </div>
+
+      <div class="text-center mt-4">
+        <button type="submit" class="btn btn-save w-100">💾 ذخیره تغییرات</button>
+      </div>
+    </form>
+
+    <div class="text-center mt-3">
+      <a href="{% url 'dashboard' %}" class="text-light">⬅️ بازگشت به داشبورد</a>
+    </div>
+  </div>
+</body>
+</html>

@@ -1,0 +1,65 @@
+{% load static %}
+{% load humanize %}
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>امتیاز عضو</title>
+
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+
+    <style>
+        body {
+            background: #f3f4f6;
+            font-family: "Vazir", sans-serif;
+        }
+        .score-card {
+            background: #ffffff;
+            border-radius: 12px;
+            padding: 25px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.05);
+            text-align: center;
+            margin-top: 40px;
+        }
+        .score-title {
+            font-size: 22px;
+            font-weight: bold;
+            margin-bottom: 15px;
+        }
+        .score-number {
+            font-size: 30px;
+            color: #0d6efd;
+            font-weight: bold;
+        }
+        .rank-number {
+            font-size: 28px;
+            color: #198754;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <div class="col-lg-6 col-md-8 col-sm-12 mx-auto score-card">
+        
+        <h3 class="score-title">امتیاز کل شما</h3>
+        <p class="score-number">{{ member.total_score|intcomma }}</p>
+
+        <hr>
+
+        <h4>رتبه شما در بین اعضا</h4>
+        <p class="rank-number">{{ rank }}</p>
+
+        <hr>
+
+        <p class="text-muted">آخرین بروزرسانی: {{ member.updated_at|naturaltime }}</p>
+
+    </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+
+</body>
+</html>

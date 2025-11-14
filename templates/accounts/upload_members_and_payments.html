@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% load static %}
+
+{% block content %}
+<div class="container mt-5">
+    <h2 class="mb-4 text-center">مدیریت اعضا و واریزی‌ها</h2>
+
+    <!-- پیام‌ها -->
+    {% if messages %}
+        {% for message in messages %}
+            <div class="alert {% if message.tags %}alert-{{ message.tags }}{% else %}alert-info{% endif %} alert-dismissible fade show" role="alert">
+                {{ message|safe }}
+                <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+            </div>
+        {% endfor %}
+    {% endif %}
+
+    <div class="row">
+        <!-- کارت دانلود فایل نمونه -->
+        <div class="col-md-6 mb-4">
+            <div class="card shadow-sm">
+                <div class="card-body text-center">
+                    <h5 class="card-title">فایل نمونه اکسل</h5>
+                    <p class="card-text">برای آپلود صحیح اعضا و واریزی‌ها از فایل نمونه استفاده کنید.</p>
+                    <a href="{% url 'download_sample_excel' %}" class="btn btn-success">
+                        دانلود فایل نمونه
+                    </a>
+                </div>
+            </div>
+        </div>
+
+        <!-- کارت آپلود فایل -->
+        <div class="col-md-6 mb-4">
+            <div class="card shadow-sm">
+                <div class="card-body">
+                    <h5 class="card-title text-center">آپلود فایل اعضا و واریزی‌ها</h5>
+                    <form method="post" enctype="multipart/form-data">
+                        {% csrf_token %}
+                        <div class="mb-3">
+                            <label for="excel_file" class="form-label">انتخاب فایل اکسل</label>
+                            <input type="file" name="excel_file" id="excel_file" class="form-control" required>
+                        </div>
+                        <div class="d-grid">
+                            <button type="submit" class="btn btn-primary">آپلود و پردازش</button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+{% endblock %}
