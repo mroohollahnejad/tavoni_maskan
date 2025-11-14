@@ -1,4 +1,5 @@
 from pathlib import Path
+import dj_database_url
 import os
 
 # مسیر اصلی پروژه
@@ -8,8 +9,8 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # تنظیمات امنیتی و پایه
 # ==============================
 SECRET_KEY = 'django-insecure-bc%!5d@(l(@)kox^8xsmag4vo-n*z1we8*0ohy($p%bh(o-a1j'
-DEBUG = True
-ALLOWED_HOSTS = []  # در حالت توسعه خالی می‌ماند
+DEBUG = False
+ALLOWED_HOSTS = ['https://tavoni-maskan.onrender.com']  # در حالت توسعه خالی می‌ماند
 
 # ==============================
 # اپلیکیشن‌ها
@@ -33,6 +34,7 @@ INSTALLED_APPS = [
 # میان‌افزارها
 # ==============================
 MIDDLEWARE = [
+    'whitenoise.middleware.WhiteNoiseMiddleware',
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
@@ -69,10 +71,12 @@ WSGI_APPLICATION = 'config.wsgi.application'
 # پایگاه داده
 # ==============================
 DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
-    }
+    'default': dj_database_url.config(
+        default=os.environ.get("DATABASE_URL"),
+        conn_max_age=600,
+        ssl_require=True,
+    )
+    #'default': {'ENGINE': 'django.db.backends.sqlite3','NAME': BASE_DIR / 'db.sqlite3',    }
 }
 
 # ==============================
