@@ -2,16 +2,20 @@ from pathlib import Path
 import dj_database_url
 import os
 
+# ==============================
 # مسیر اصلی پروژه
+# ==============================
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 # ==============================
-# تنظیمات امنیتی و پایه
+# تنظیمات امنیتی
 # ==============================
 SECRET_KEY = os.environ.get('SECRET_KEY', 'fallback-secret-key')
 
-DEBUG = False
-ALLOWED_HOSTS = ['*']  # در حالت توسعه خالی می‌ماند
+DEBUG = os.environ.get('DEBUG', 'False') == 'True'
+
+# فقط برای Render
+ALLOWED_HOSTS = ['*']
 
 # ==============================
 # اپلیکیشن‌ها
@@ -23,8 +27,9 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
-    'django.contrib.humanize',
+
     # اپ‌های جانبی
+    'django.contrib.humanize',
     'django_jalali',
 
     # اپ‌های پروژه
@@ -33,10 +38,14 @@ INSTALLED_APPS = [
 
 # ==============================
 # میان‌افزارها
+# ترتیب مهم است!
 # ==============================
 MIDDLEWARE = [
-    'whitenoise.middleware.WhiteNoiseMiddleware',
     'django.middleware.security.SecurityMiddleware',
+
+    # Whitenoise برای سرو static در Render
+    'whitenoise.middleware.WhiteNoiseMiddleware',
+
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
@@ -48,12 +57,12 @@ MIDDLEWARE = [
 ROOT_URLCONF = 'config.urls'
 
 # ==============================
-# قالب‌ها (Templates)
+# قالب‌ها
 # ==============================
 TEMPLATES = [
     {
         'BACKEND': 'django.template.backends.django.DjangoTemplates',
-        'DIRS': [BASE_DIR / 'templates'],  # فولدر عمومی قالب‌ها
+        'DIRS': [BASE_DIR / 'templates'],
         'APP_DIRS': True,
         'OPTIONS': {
             'context_processors': [
@@ -69,7 +78,7 @@ TEMPLATES = [
 WSGI_APPLICATION = 'config.wsgi.application'
 
 # ==============================
-# پایگاه داده
+# پایگاه داده (Render + Supabase)
 # ==============================
 DATABASES = {
     'default': dj_database_url.config(
@@ -77,11 +86,10 @@ DATABASES = {
         conn_max_age=600,
         ssl_require=True,
     )
-    #'default': {'ENGINE': 'django.db.backends.sqlite3','NAME': BASE_DIR / 'db.sqlite3',    }
 }
 
 # ==============================
-# تنظیمات رمز عبور
+# امنیت رمز عبور
 # ==============================
 AUTH_PASSWORD_VALIDATORS = [
     {'NAME': 'django.contrib.auth.password_validation.UserAttributeSimilarityValidator'},
@@ -91,33 +99,40 @@ AUTH_PASSWORD_VALIDATORS = [
 ]
 
 # ==============================
-# تنظیمات زبان و زمان
+# زبان و زمان
 # ==============================
-LANGUAGE_CODE = 'fa-ir'  # فارسی
+LANGUAGE_CODE = 'fa-ir'
 TIME_ZONE = 'Asia/Tehran'
 USE_I18N = True
 USE_TZ = True
 
 # ==============================
-# فایل‌های استاتیک و رسانه‌ای
+# فایل‌های استاتیک – مخصوص Render
 # ==============================
 STATIC_URL = '/static/'
-STATICFILES_DIRS = [BASE_DIR / 'static']
-
-# فولدر جمع‌آوری شده برای deploy
 STATIC_ROOT = BASE_DIR / 'staticfiles'
 
-MEDIA_URL = '/media/'
-MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
+# فقط در حالت توسعه staticfiles داخلی فعال شود
+if DEBUG:
+    STATICFILES_DIRS = [BASE_DIR / 'static']
+
+# فعال‌سازی GZip + Compression whitenoise
+STATICFILES_STORAGE = "whitenoise.storage.CompressedManifestStaticFilesStorage"
 
 # ==============================
-# مسیرهای ورود و خروج
+# فایل‌های رسانه‌ای
+# ==============================
+MEDIA_URL = '/media/'
+MEDIA_ROOT = BASE_DIR / 'media'
+
+# ==============================
+# مسیرهای ورود / خروج
 # ==============================
 LOGIN_URL = '/login/'
 LOGIN_REDIRECT_URL = 'dashboard'
 LOGOUT_REDIRECT_URL = 'login'
 
 # ==============================
-# تنظیمات کلید اصلی مدل‌ها
+# تنظیم کلید اصلی
 # ==============================
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
