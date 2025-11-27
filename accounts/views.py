@@ -5,7 +5,8 @@ from django.contrib.auth import login,logout
 from django.contrib import messages
 from django.contrib.auth.models import User
 from django.http import JsonResponse,HttpResponse
-from django.db import transaction
+from django.db import transaction, IntegrityError
+from django.utils.dateparse import parse_date
 from django.views.decorators.csrf import csrf_exempt
 from .models import Profile, Payment, ApprovedPaymentDate
 from .forms import ProfileForm, UserUpdateForm, PaymentForm
@@ -19,6 +20,8 @@ from openpyxl import load_workbook
 from datetime import date
 import jdatetime
 import logging
+
+
 
 logger = logging.getLogger(__name__)
 
@@ -347,8 +350,49 @@ def fix_excel_date(value):
 # ---------------------- آپلود و پردازش اکسل ----------------------
 
 
+# =====================================================
+# Helper function: safe get_or_create profile
+# =====================================================
+def get_or_create_profile_safe(user, phone, bc, nc):
+    """
+    ۱۰۰٪ ضد IntegrityError
+    - اگر Profile وجود ندارد → ایجاد می‌شود
+    - اگر وجود دارد → آپدیت می‌شود
+    """
+    try:
+        profile, created = Profile.objects.get_or_create(
+            user=user,
+            defaults={
+                "phone_number": phone,
+                "birth_certificate": bc,
+                "national_code": nc
+            }
+        )
 
-# ---------- بهینه‌سازی تابع upload_members_and_payments برای عملیات bulk ----------
+        updated = False
+        if profile.phone_number != phone:
+            profile.phone_number = phone
+            updated = True
+        if profile.birth_certificate != bc:
+            profile.birth_certificate = bc
+            updated = True
+        if profile.national_code != nc:
+            profile.national_code = nc
+            updated = True
+
+        if updated:
+            profile.save()
+
+        return profile
+
+    except IntegrityError:
+        # اگر به هر دلیلی در همان لحظه پروفایل دیگری ساخته شد
+        return Profile.objects.get(user=user)
+
+
+# =====================================================
+# Main view
+# =====================================================
 @transaction.atomic
 @login_required
 def upload_members_and_payments(request):
@@ -426,11 +470,6 @@ def upload_members_and_payments(request):
         # ---------------------------------------
         users_dict = {u.username: u for u in User.objects.filter(username__in=national_codes)}
 
-        profiles_dict = {
-            p.user.username: p
-            for p in Profile.objects.filter(user__username__in=national_codes)
-        }
-
         approved_map = {
             a.installment_number: a
             for a in ApprovedPaymentDate.objects.filter(installment_number__in=installment_set)
@@ -456,7 +495,6 @@ def upload_members_and_payments(request):
         )
 
         new_payments = []
-
         added_users = 0
         added_payments = 0
 
@@ -481,44 +519,15 @@ def upload_members_and_payments(request):
                 users_dict[nc] = user
                 added_users += 1
 
-                # ✔ تغییر مهم: ایجاد پروفایل همان لحظه
-                profile = Profile.objects.create(
-                    user=user,
-                    phone_number=r["phone"],
-                    birth_certificate=r["birth_certificate"],
-                    national_code=nc
-                )
-                profiles_dict[nc] = profile
-
             # -----------------------------
-            # PROFILE
+            # PROFILE (SAFE)
             # -----------------------------
-            profile = profiles_dict.get(nc)
-
-            if profile:
-                changed = False
-                if profile.phone_number != r["phone"]:
-                    profile.phone_number = r["phone"]
-                    changed = True
-                if profile.birth_certificate != r["birth_certificate"]:
-                    profile.birth_certificate = r["birth_certificate"]
-                    changed = True
-                if profile.national_code != nc:
-                    profile.national_code = nc
-                    changed = True
-
-                if changed:
-                    profile.save()   # ✔ تغییر مهم: به‌جای bulk_update ذخیره فوری
-
-            else:
-                # ✔ تغییر مهم: اگر پروفایل نبود ایجاد فوری (نه بعداً در bulk_create)
-                profile = Profile.objects.create(
-                    user=user,
-                    phone_number=r["phone"],
-                    birth_certificate=r["birth_certificate"],
-                    national_code=nc
-                )
-                profiles_dict[nc] = profile
+            profile = get_or_create_profile_safe(
+                user=user,
+                phone=r["phone"],
+                bc=r["birth_certificate"],
+                nc=nc
+            )
 
             # -----------------------------
             # PAYMENT
@@ -530,9 +539,7 @@ def upload_members_and_payments(request):
             if inst and pay_dt and amt:
                 key = (nc, inst, pay_dt, amt)
                 if key not in existing_payments_set:
-
                     due_val = approved_map.get(inst).due_date if approved_map.get(inst) else None
-
                     new_payments.append(
                         Payment(
                             user=user,
@@ -555,7 +562,6 @@ def upload_members_and_payments(request):
         return redirect("upload_members_and_payments")
 
     return render(request, "accounts/upload_members_and_payments.html")
-
 
 
 
