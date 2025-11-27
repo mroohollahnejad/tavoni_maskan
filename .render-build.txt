@@ -1,0 +1,9 @@
+# استفاده از کش مخصوص پایتون برای جلوگیری از نصب دوباره بسته‌ها
+cache pip
+
+# نصب وابستگی‌ها فقط اگر تغییر کرده باشند
+pip install --upgrade pip
+pip install -r requirements.txt
+
+# جمع‌آوری فایل‌های استاتیک
+python manage.py collectstatic --noinput

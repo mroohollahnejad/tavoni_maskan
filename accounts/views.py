@@ -5,6 +5,7 @@ from django.contrib.auth import login,logout
 from django.contrib import messages
 from django.contrib.auth.models import User
 from django.http import JsonResponse,HttpResponse
+from django.db import transaction
 from django.views.decorators.csrf import csrf_exempt
 from .models import Profile, Payment, ApprovedPaymentDate
 from .forms import ProfileForm, UserUpdateForm, PaymentForm
@@ -346,8 +347,22 @@ def fix_excel_date(value):
 # ---------------------- آپلود و پردازش اکسل ----------------------
 
 
+
+# ---------- بهینه‌سازی تابع upload_members_and_payments برای عملیات bulk ----------
+@transaction.atomic
 @login_required
 def upload_members_and_payments(request):
+    """
+    نسخه بهینه‌شده: خواندن اکسل با openpyxl، تهیه لیست رکوردها در حافظه،
+    و سپس انجام bulk_create / bulk_update روی Profile و Payment تا از update_or_create
+    در هر حلقه جلوگیری شود.
+
+    نکات:
+    - برای ایجاد کاربر جدید از create_user استفاده می‌کنیم تا password هش شود.
+    - برای پروفایل‌ها از bulk_create و bulk_update استفاده می‌کنیم.
+    - برای واریزی‌ها با یک بار خواندن existing payments از ثبت تکراری جلوگیری می‌کنیم.
+    - کل عملیات داخل transaction.atomic اجرا می‌شود تا یا همه اعمال شوند یا هیچ‌کدام.
+    """
 
     if request.method == "POST" and request.FILES.get("excel_file"):
         excel_file = request.FILES["excel_file"]
@@ -355,10 +370,12 @@ def upload_members_and_payments(request):
         try:
             wb = load_workbook(excel_file, data_only=True)
             sheet = wb.active
-        except Exception:
+        except Exception as e:
+            logger.exception("error opening excel file")
             messages.error(request, "❌ خطا در باز کردن فایل. لطفاً فایل اکسل معتبر بارگذاری کنید.")
             return redirect("upload_members_and_payments")
 
+        # خواندن هدرها (فارسی)
         headers = [str(cell.value).strip() if cell.value else "" for cell in sheet[1]]
         expected_headers = [
             "نام", "نام خانوادگی", "کد ملی", "شماره همراه", "ایمیل",
@@ -370,15 +387,20 @@ def upload_members_and_payments(request):
             messages.error(request, f"❌ ستون‌های زیر در فایل وجود ندارند: {', '.join(missing_headers)}")
             return redirect("upload_members_and_payments")
 
-        added_users = 0
-        added_payments = 0
+        # جمع‌آوری تمام ردیف‌ها در حافظه (لیست دیکشنری)
+        rows = []
+        national_codes = set()
+        installment_set = set()
 
         for row in sheet.iter_rows(min_row=2, values_only=True):
             data = dict(zip(headers, row))
 
+            national_code = str(data.get("کد ملی", "")).strip()
+            if not national_code:
+                continue
+
             first_name = str(data.get("نام", "")).strip()
             last_name = str(data.get("نام خانوادگی", "")).strip()
-            national_code = str(data.get("کد ملی", "")).strip()
             phone = str(data.get("شماره همراه", "")).strip()
             email = str(data.get("ایمیل", "")).strip()
             birth_certificate = str(data.get("شماره شناسنامه", "")).strip()
@@ -387,72 +409,138 @@ def upload_members_and_payments(request):
             payment_date = parse_date(data.get("تاریخ واریز"))
             amount = data.get("مبلغ واریزی")
 
-            if not national_code:
-                continue
+            # نرمال‌سازی مقدارها
+            if installment_number is not None:
+                try:
+                    installment_number = int(installment_number)
+                    installment_set.add(installment_number)
+                except Exception:
+                    installment_number = None
 
-            # ---------------------- ایجاد/آپدیت کاربر ----------------------
-            user, created = User.objects.get_or_create(username=national_code)
+            # جمع‌آوری ردیف
+            rows.append({
+                "national_code": national_code,
+                "first_name": first_name,
+                "last_name": last_name,
+                "phone": phone,
+                "email": email,
+                "birth_certificate": birth_certificate,
+                "installment_number": installment_number,
+                "payment_date": payment_date,
+                "amount": amount
+            })
+            national_codes.add(national_code)
 
-            if created:
-                user.first_name = first_name
-                user.last_name = last_name
-                user.email = email
-                user.set_password(national_code)  # ✅ رمز عبور = کد ملی
-                user.save()
+        if not rows:
+            messages.warning(request, "هیچ رکورد معتبری در فایل یافت نشد.")
+            return redirect("upload_members_and_payments")
+
+        # --------------------------------------------------
+        # داده‌های موجود در DB را یک‌بار بخوانیم
+        # --------------------------------------------------
+        existing_users_qs = User.objects.filter(username__in=national_codes)
+        users_dict = {u.username: u for u in existing_users_qs}
+
+        existing_profiles_qs = Profile.objects.filter(user__username__in=national_codes).select_related('user')
+        profiles_dict = {p.user.username: p for p in existing_profiles_qs}
+
+        # ApprovedPaymentDate برای شماره اقساط موجود را بگیریم
+        approved_dates_qs = ApprovedPaymentDate.objects.filter(installment_number__in=installment_set)
+        approved_map = {a.installment_number: a for a in approved_dates_qs}
+
+        # اگر برخی installment در DB نبود، آن‌ها را ایجاد (bulk) کنیم
+        missing_installments = [i for i in installment_set if i not in approved_map]
+        if missing_installments:
+            objs = [ApprovedPaymentDate(installment_number=i, due_date=None) for i in missing_installments]
+            ApprovedPaymentDate.objects.bulk_create(objs)
+            # refresh map
+            for a in ApprovedPaymentDate.objects.filter(installment_number__in=missing_installments):
+                approved_map[a.installment_number] = a
+
+        # existing payments set برای جلوگیری از درج تکراری
+        existing_payments_qs = Payment.objects.filter(user__username__in=national_codes, installment_number__in=installment_set)
+        existing_payments_set = set()
+        for p in existing_payments_qs.values_list('user__username', 'installment_number', 'payment_date', 'amount'):
+            # مقدار payment_date ممکن است None باشد؛ تبدیل به str برای مقایسه
+            existing_payments_set.add((p[0], p[1], str(p[2]) if p[2] is not None else None, float(p[3]) if p[3] is not None else None))
+
+        # --------------------------------------------------
+        # آماده‌سازی لیست‌های bulk
+        # --------------------------------------------------
+        new_users = []         # لیست User (objects) که باید ایجاد شوند
+        new_profiles = []      # لیست Profile برای bulk_create
+        update_profiles = []   # لیست Profile برای bulk_update
+        new_payments = []      # لیست Payment برای bulk_create
+
+        added_users = 0
+        added_payments = 0
+
+        # برای هر ردیف در اکسل، اشیاء مربوطه را در لیست‌ها قرار می‌دهیم
+        for r in rows:
+            nc = r['national_code']
+
+            # --- user ---
+            user = users_dict.get(nc)
+            if not user:
+                # ایجاد کاربر جدید (با هش کردن پسورد)
+                user = User.objects.create_user(username=nc, password=nc, first_name=r['first_name'], last_name=r['last_name'], email=r['email'])
+                users_dict[nc] = user
                 added_users += 1
+
+            # --- profile ---
+            profile = profiles_dict.get(nc)
+            if profile:
+                # به‌روزرسانی در حافظه
+                changed = False
+                if profile.phone_number != r['phone']:
+                    profile.phone_number = r['phone']
+                    changed = True
+                if profile.birth_certificate != r['birth_certificate']:
+                    profile.birth_certificate = r['birth_certificate']
+                    changed = True
+                if profile.national_code != nc:
+                    profile.national_code = nc
+                    changed = True
+                if changed:
+                    update_profiles.append(profile)
             else:
-                updated = False
-                if user.first_name != first_name:
-                    user.first_name = first_name
-                    updated = True
-                if user.last_name != last_name:
-                    user.last_name = last_name
-                    updated = True
-                if user.email != email:
-                    user.email = email
-                    updated = True
-                if updated:
-                    user.save()
+                p = Profile(user=user, phone_number=r['phone'], birth_certificate=r['birth_certificate'], national_code=nc)
+                new_profiles.append(p)
+                profiles_dict[nc] = p
 
-            # ---------------------- ایجاد/آپدیت پروفایل ----------------------
-            Profile.objects.update_or_create(
-                user=user,
-                defaults={
-                    "phone_number": phone,
-                    "birth_certificate": birth_certificate,
-                    "national_code": national_code,
-                },
-            )
+            # --- payment ---
+            inst = r['installment_number']
+            pay_dt = r['payment_date']
+            amt = r['amount']
+            if inst and pay_dt and amt:
+                key = (nc, inst, str(pay_dt) if pay_dt is not None else None, float(amt) if amt is not None else None)
+                if key in existing_payments_set:
+                    continue
 
-            # ---------------------- ثبت واریزی با جلوگیری از تکراری ----------------------
-            if installment_number and payment_date and amount:
-                installment_number = int(installment_number)
+                due_date_val = approved_map.get(inst).due_date if approved_map.get(inst) else None
 
-                # جلوگیری از ثبت رکورد تکراری کامل
-                exists_same = Payment.objects.filter(
+                payment = Payment(
                     user=user,
-                    installment_number=installment_number,
-                    payment_date=payment_date,
-                    amount=amount
-                ).exists()
-
-                if exists_same:
-                    continue  # رکورد تکراری → ثبت نشود
-
-                # تاریخ مصوب از مدیریت گرفته می‌شود
-                approved_date_obj, _ = ApprovedPaymentDate.objects.get_or_create(
-                    installment_number=installment_number,
-                    defaults={"due_date": None},
+                    installment_number=inst,
+                    amount=amt,
+                    payment_date=pay_dt,
+                    due_date=due_date_val
                 )
-
-                Payment.objects.create(
-                    user=user,
-                    installment_number=installment_number,
-                    amount=amount,
-                    payment_date=payment_date,
-                    due_date=approved_date_obj.due_date
-                )
+                new_payments.append(payment)
                 added_payments += 1
+
+        # --------------------------------------------------
+        # اجرای عملیات bulk در DB
+        # --------------------------------------------------
+        if new_profiles:
+            Profile.objects.bulk_create(new_profiles, batch_size=500)
+
+        if update_profiles:
+            # مشخص کردن فیلدهای قابل به‌روزرسانی
+            Profile.objects.bulk_update(update_profiles, ['phone_number', 'birth_certificate', 'national_code'], batch_size=500)
+
+        if new_payments:
+            Payment.objects.bulk_create(new_payments, batch_size=500)
 
         msg = (
             f"✅ فایل با موفقیت پردازش شد. "
@@ -463,6 +551,9 @@ def upload_members_and_payments(request):
         return redirect("upload_members_and_payments")
 
     return render(request, "accounts/upload_members_and_payments.html")
+
+
+
 
 
 
