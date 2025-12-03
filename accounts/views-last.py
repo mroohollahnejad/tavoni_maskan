@@ -393,174 +393,125 @@ def get_or_create_profile_safe(user, phone, bc, nc):
 # =====================================================
 # Main view
 # =====================================================
-# =====================================================
-# تابع تمیز کردن کدملی و شماره شناسنامه (مهم‌ترین بخش!)
-# =====================================================
-def clean_national_code(raw_value):
-    """
-    تبدیل هر نوع کدملی کثیف به یک کدملی تمیز ۱۰ رقمی
-    مثال‌ها:
-        '0123456789     → 0123456789
-        00123456789     → 0123456789
-        (۱۰ رقم آخر)
-        "0012345678"    → 0012345678
-        ۳۳۹۲۰۴۸۴۴۴      → 3392048444
-        '۰۰۱۲۳۴۵۶۷۸۹    → 0123456789
-    """
-    if not raw_value:
-        return ""
-    # تبدیل به رشته و حذف فاصله‌های ابتدا و انتها و کوتیشن‌ها
-    s = str(raw_value).strip().strip("'\"")
-    # فقط اعداد را نگه دار (حتی اگر فارسی باشه)
-    s = ''.join(c for c in s if c.isdigit())
-    if not s:
-        return ""
-    # حذف صفرهای ابتدایی اضافی
-    s = s.lstrip('0')
-    if not s:  # مثلاً 0000000000
-        s = "0"
-    # دقیقاً ۱۰ رقم آخر را بگیر و از چپ با صفر پر کن
-    return s[-10:].zfill(10)
-
-
-# =====================================================
-# آپلود اعضا و واریزی‌ها — نسخه ۱۰۰٪ ضد خطا و ضد کوتیشن اکسل
-# =====================================================
 @transaction.atomic
 @login_required
-@user_passes_test(is_admin)  # فقط ادمین یا مدیران مجاز
 def upload_members_and_payments(request):
+
     if request.method == "POST" and request.FILES.get("excel_file"):
         excel_file = request.FILES["excel_file"]
-
-        # بررسی نوع فایل
-        if not excel_file.name.endswith(('.xlsx', '.xls')):
-            messages.error(request, "فقط فایل‌های اکسل (.xlsx یا .xls) مجاز هستند.")
-            return redirect("upload_members_and_payments")
 
         try:
             wb = load_workbook(excel_file, data_only=True)
             sheet = wb.active
-        except Exception as e:
-            messages.error(request, "خطا در خواندن فایل اکسل. فایل خراب یا قفل است.")
+        except:
+            messages.error(request, "❌ خطا در باز کردن فایل. لطفاً فایل اکسل معتبر بارگذاری کنید.")
             return redirect("upload_members_and_payments")
 
-        # خواندن هدرها
         headers = [str(cell.value).strip() if cell.value else "" for cell in sheet[1]]
         expected_headers = [
             "نام", "نام خانوادگی", "کد ملی", "شماره همراه", "ایمیل",
             "شماره شناسنامه", "نوبت واریز", "تاریخ واریز", "مبلغ واریزی"
         ]
+
         missing_headers = [h for h in expected_headers if h not in headers]
         if missing_headers:
-            messages.error(request, f"ستون‌های زیر پیدا نشدند: {', '.join(missing_headers)}")
+            messages.error(request, f"❌ ستون‌های زیر در فایل وجود ندارند: {', '.join(missing_headers)}")
             return redirect("upload_members_and_payments")
 
         rows = []
-        seen_national_codes = set()
-        installment_numbers = set()
+        national_codes = set()
+        installment_set = set()
 
-        added_users = 0
-        added_payments = 0
-        skipped_rows = 0
-
-        for row_idx, row in enumerate(sheet.iter_rows(min_row=2, values_only=True), start=2):
+        # --------------------------
+        # Collect rows in memory
+        # --------------------------
+        for row in sheet.iter_rows(min_row=2, values_only=True):
             data = dict(zip(headers, row))
 
-            # تمیز کردن و اعتبارسنجی کدملی — مهم‌ترین بخش
-            raw_nc = data.get("کد ملی")
-            nc = clean_national_code(raw_nc)
-
-            if not nc or len(nc) != 10:
-                messages.warning(request, f"ردیف {row_idx}: کدملی نامعتبر نادیده گرفته شد → '{raw_nc}'")
-                skipped_rows += 1
+            nc = str(data.get("کد ملی") or "").strip()
+            if not nc:
                 continue
 
-            if nc in seen_national_codes:
-                messages.warning(request, f"ردیف {row_idx}: کدملی تکراری نادیده گرفته شد → {nc}")
-                skipped_rows += 1
-                continue
-
-            seen_national_codes.add(nc)
-
-            # بقیه فیلدها
-            first_name = str(data.get("نام") or "").strip()
-            last_name = str(data.get("نام خانوادگی") or "").strip()
+            first = str(data.get("نام") or "").strip()
+            last = str(data.get("نام خانوادگی") or "").strip()
             phone = str(data.get("شماره همراه") or "").strip()
-            email = str(data.get("ایمیل") or "").strip() or f"{nc}@temp.com"
-            birth_cert = str(data.get("شماره شناسنامه") or "").strip().strip("'\"")
-            birth_cert = ''.join(c for c in birth_cert if c.isdigit()) or ""
+            email = str(data.get("ایمیل") or "").strip()
+            bc = str(data.get("شماره شناسنامه") or "").strip()
 
             inst = data.get("نوبت واریز")
-            try:
-                inst = int(inst) if inst else None
-                if inst:
-                    installment_numbers.add(inst)
-            except (ValueError, TypeError):
-                inst = None
+            pay_dt = parse_date(data.get("تاریخ واریز"))
+            amt = data.get("مبلغ واریزی")
 
-            payment_date = fix_excel_date(data.get("تاریخ واریز"))  # از تابع قبلی شما
-            amount = data.get("مبلغ واریزی")
             try:
-                amount = float(amount) if amount else 0
-                amount = int(amount) if amount == int(amount) else amount
+                inst = int(inst)
+                installment_set.add(inst)
             except:
-                amount = 0
+                inst = None
 
             rows.append({
                 "national_code": nc,
-                "first_name": first_name,
-                "last_name": last_name,
+                "first_name": first,
+                "last_name": last,
                 "phone": phone,
                 "email": email,
-                "birth_certificate": birth_cert,
+                "birth_certificate": bc,
                 "installment_number": inst,
-                "payment_date": payment_date,
-                "amount": amount,
+                "payment_date": pay_dt,
+                "amount": amt,
             })
+            national_codes.add(nc)
 
         if not rows:
-            messages.error(request, "هیچ عضو معتبری در فایل یافت نشد.")
+            messages.warning(request, "هیچ رکورد معتبری در فایل یافت نشد.")
             return redirect("upload_members_and_payments")
 
-        # گرفتن کاربران موجود
-        existing_users = User.objects.filter(username__in=seen_national_codes)
-        users_dict = {u.username: u for u in existing_users}
-
-        # ایجاد نوبت‌های جدید در صورت نیاز
-        if installment_numbers:
-            existing_installments = set(ApprovedPaymentDate.objects
-                .filter(installment_number__in=installment_numbers)
-                .values_list("installment_number", flat=True))
-            missing = installment_numbers - existing_installments
-            if missing:
-                ApprovedPaymentDate.objects.bulk_create([
-                    ApprovedPaymentDate(installment_number=i) for i in missing
-                ])
+        # ---------------------------------------
+        # Fetch existing data
+        # ---------------------------------------
+        users_dict = {u.username: u for u in User.objects.filter(username__in=national_codes)}
 
         approved_map = {
-            a.installment_number: a.due_date
-            for a in ApprovedPaymentDate.objects.filter(installment_number__in=installment_numbers)
+            a.installment_number: a
+            for a in ApprovedPaymentDate.objects.filter(installment_number__in=installment_set)
         }
 
-        # پرداخت‌های موجود (برای جلوگیری از تکرار)
-        existing_payments = Payment.objects.filter(
-            user__username__in=seen_national_codes,
-            installment_number__in=installment_numbers
-        ).values_list('user__username', 'installment_number', 'payment_date', 'amount')
-        existing_payment_keys = {(u, i, d, a) for u, i, d, a in existing_payments}
+        # missing installments
+        missing_inst = [i for i in installment_set if i not in approved_map]
+        if missing_inst:
+            ApprovedPaymentDate.objects.bulk_create(
+                [ApprovedPaymentDate(installment_number=i, due_date=None) for i in missing_inst]
+            )
+            for a in ApprovedPaymentDate.objects.filter(installment_number__in=missing_inst):
+                approved_map[a.installment_number] = a
+
+        # existing payments
+        existing_payments_set = set(
+            Payment.objects.filter(
+                user__username__in=national_codes,
+                installment_number__in=installment_set
+            ).values_list(
+                "user__username", "installment_number", "payment_date", "amount"
+            )
+        )
 
         new_payments = []
+        added_users = 0
+        added_payments = 0
 
+        # =========================================
+        # MAIN LOOP
+        # =========================================
         for r in rows:
             nc = r["national_code"]
 
-            # ایجاد یا دریافت کاربر
+            # -----------------------------
+            # USER
+            # -----------------------------
             user = users_dict.get(nc)
             if not user:
                 user = User.objects.create_user(
                     username=nc,
-                    password=nc,  # موقت — بعداً باید تغییر رمز بدن
+                    password=nc,
                     first_name=r["first_name"],
                     last_name=r["last_name"],
                     email=r["email"],
@@ -568,40 +519,51 @@ def upload_members_and_payments(request):
                 users_dict[nc] = user
                 added_users += 1
 
-            # ایجاد یا آپدیت پروفایل (کاملاً ایمن)
-            profile, _ = Profile.objects.get_or_create(user=user)
-            profile.phone_number = r["phone"]
-            profile.birth_certificate = r["birth_certificate"]
-            profile.national_code = nc
-            profile.save()
+            # -----------------------------
+            # PROFILE (SAFE)
+            # -----------------------------
+            profile = get_or_create_profile_safe(
+                user=user,
+                phone=r["phone"],
+                bc=r["birth_certificate"],
+                nc=nc
+            )
 
-            # ثبت واریزی (فقط اگر جدید باشد)
-            if (r["installment_number"] and r["payment_date"] and r["amount"]):
-                key = (nc, r["installment_number"], r["payment_date"], r["amount"])
-                if key not in existing_payment_keys:
-                    new_payments.append(Payment(
-                        user=user,
-                        installment_number=r["installment_number"],
-                        payment_date=r["payment_date"],
-                        amount=r["amount"],
-                        due_date=approved_map.get(r["installment_number"]),
-                    ))
+            # -----------------------------
+            # PAYMENT
+            # -----------------------------
+            inst = r["installment_number"]
+            pay_dt = r["payment_date"]
+            amt = r["amount"]
+
+            if inst and pay_dt and amt:
+                key = (nc, inst, pay_dt, amt)
+                if key not in existing_payments_set:
+                    due_val = approved_map.get(inst).due_date if approved_map.get(inst) else None
+                    new_payments.append(
+                        Payment(
+                            user=user,
+                            installment_number=inst,
+                            payment_date=pay_dt,
+                            amount=amt,
+                            due_date=due_val,
+                        )
+                    )
                     added_payments += 1
 
-        # ثبت گروهی واریزی‌ها
+        # bulk insert payments only
         if new_payments:
-            Payment.objects.bulk_create(new_payments, ignore_conflicts=True)
+            Payment.objects.bulk_create(new_payments, batch_size=500)
 
-        messages.success(request,
-            f"آپلود موفق! "
-            f"{added_users} کاربر جدید، "
-            f"{added_payments} واریزی جدید، "
-            f"{skipped_rows} ردیف نادیده گرفته شد."
+        messages.success(
+            request,
+            f"✅ پردازش موفق: {added_users} کاربر جدید، {added_payments} واریزی جدید ثبت شد."
         )
         return redirect("upload_members_and_payments")
 
-    # GET request — نمایش فرم
     return render(request, "accounts/upload_members_and_payments.html")
+
+
 
 # ---------------------- ورود کاربر ----------------------
 from django.contrib.auth.views import LoginView
