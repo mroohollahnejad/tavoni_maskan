@@ -1,7 +1,6 @@
 from pathlib import Path
-import os
 import dj_database_url
-from django.contrib.messages import constants as messages
+import os
 
 # ==============================
 # مسیر اصلی پروژه
@@ -9,27 +8,14 @@ from django.contrib.messages import constants as messages
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 # ==============================
-# کلید امنیتی — در لوکال از .env استفاده کن
+# تنظیمات امنیتی
 # ==============================
-SECRET_KEY = os.environ.get('SECRET_KEY', 'django-insecure-change-me-in-production-please!')
+SECRET_KEY = os.environ.get('SECRET_KEY', 'fallback-secret-key')
 
-# ==============================
-# حالت دیباگ
-# ==============================
-DEBUG = 'True'
+DEBUG = os.environ.get('DEBUG', 'False') == 'True'
 
-# ==============================
-# هاست‌های مجاز
-# ==============================
-ALLOWED_HOSTS = [
-    'localhost',
-    '127.0.0.1',
-    '.onrender.com',  # برای همه ساب‌دامین‌های Render
-]
-
-# اگر در Render هست، همه هاست‌ها رو قبول کن (ایمن‌تر از * است)
-if os.environ.get('RENDER'):
-    ALLOWED_HOSTS = ['*']
+# فقط برای Render
+ALLOWED_HOSTS = ['*']
 
 # ==============================
 # اپلیکیشن‌ها
@@ -46,16 +32,20 @@ INSTALLED_APPS = [
     'django.contrib.humanize',
     'django_jalali',
 
-    # اپ پروژه
+    # اپ‌های پروژه
     'accounts',
 ]
 
 # ==============================
 # میان‌افزارها
+# ترتیب مهم است!
 # ==============================
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
-    'whitenoise.middleware.WhiteNoiseMiddleware',  # برای static در Render
+
+    # Whitenoise برای سرو static در Render
+    'whitenoise.middleware.WhiteNoiseMiddleware',
+
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
@@ -88,28 +78,18 @@ TEMPLATES = [
 WSGI_APPLICATION = 'config.wsgi.application'
 
 # ==============================
-# دیتابیس — هوشمند: لوکال → SQLite | Render → PostgreSQL
+# پایگاه داده (Render + Supabase)
 # ==============================
-if os.environ.get('DATABASE_URL'):
-    # در Render یا وقتی DATABASE_URL ست شد → PostgreSQL
-    DATABASES = {
-        'default': dj_database_url.config(
-            default=os.environ.get('DATABASE_URL'),
-            conn_max_age=600,
-            ssl_require=True,
-        )
-    }
-else:
-    # در لوکال → از SQLite ساده استفاده کن
-    DATABASES = {
-        'default': {
-            'ENGINE': 'django.db.backends.sqlite3',
-            'NAME': BASE_DIR / 'db.sqlite3',
-        }
-    }
+DATABASES = {
+    'default': dj_database_url.config(
+        default=os.environ.get("DATABASE_URL"),
+        conn_max_age=600,
+        ssl_require=True,
+    )
+}
 
 # ==============================
-# اعتبارسنجی رمز عبور
+# امنیت رمز عبور
 # ==============================
 AUTH_PASSWORD_VALIDATORS = [
     {'NAME': 'django.contrib.auth.password_validation.UserAttributeSimilarityValidator'},
@@ -119,67 +99,40 @@ AUTH_PASSWORD_VALIDATORS = [
 ]
 
 # ==============================
-# زبان و زمان — فارسی
+# زبان و زمان
 # ==============================
 LANGUAGE_CODE = 'fa-ir'
 TIME_ZONE = 'Asia/Tehran'
 USE_I18N = True
-USE_L10N = True
 USE_TZ = True
 
 # ==============================
-# فایل‌های استاتیک
+# فایل‌های استاتیک – مخصوص Render
 # ==============================
 STATIC_URL = '/static/'
-STATIC_ROOT = BASE_DIR / 'staticfiles'        # برای collectstatic در Render
-STATICFILES_DIRS = [BASE_DIR / 'static'] if DEBUG else []
+STATIC_ROOT = BASE_DIR / 'staticfiles'
 
-# Whitenoise با فشرده‌سازی و کش قوی
-STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
+# فقط در حالت توسعه staticfiles داخلی فعال شود
+if DEBUG:
+    STATICFILES_DIRS = [BASE_DIR / 'static']
+
+# فعال‌سازی GZip + Compression whitenoise
+STATICFILES_STORAGE = "whitenoise.storage.CompressedManifestStaticFilesStorage"
 
 # ==============================
-# فایل‌های آپلود شده (عکس پروفایل و ...)
+# فایل‌های رسانه‌ای
 # ==============================
 MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
 
 # ==============================
-# ورود و خروج
+# مسیرهای ورود / خروج
 # ==============================
 LOGIN_URL = '/login/'
 LOGIN_REDIRECT_URL = 'dashboard'
 LOGOUT_REDIRECT_URL = 'login'
 
 # ==============================
-# پیام‌های Django (برای رنگ‌بندی bootstrap)
-# ==============================
-MESSAGE_TAGS = {
-    messages.DEBUG: 'debug',
-    messages.INFO: 'info',
-    messages.SUCCESS: 'success',
-    messages.WARNING: 'warning',
-    messages.ERROR: 'danger',
-}
-
-# ==============================
-# فیلد پیش‌فرض برای مدل‌ها
+# تنظیم کلید اصلی
 # ==============================
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
-
-# ==============================
-# لاگ‌گیری در لوکال (اختیاری اما خیلی مفیده)
-# ==============================
-if DEBUG:
-    LOGGING = {
-        'version': 1,
-        'disable_existing_loggers': False,
-        'handlers': {
-            'console': {
-                'class': 'logging.StreamHandler',
-            },
-        },
-        'root': {
-            'handlers': ['console'],
-            'level': 'INFO',
-        },
-    }

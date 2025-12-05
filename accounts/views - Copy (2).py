@@ -17,11 +17,6 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-
-#===============================================================
-def has_finance_access(user):
-    return user.is_superuser or user.groups.filter(name='finance').exists()
-
 # ================== متغیر سراسری عناوین ستون‌های اکسل ==================
 EXCEL_HEADERS = [
     "نام", "نام خانوادگی", "کد ملی", "شماره همراه", "ایمیل",
@@ -322,9 +317,6 @@ def dashboard(request):
 @csrf_exempt
 @login_required
 def payment_create_ajax(request):
-    if not has_finance_access(request.user):
-        return JsonResponse({'status': 'error', 'message': '⛔ شما دسترسی ثبت واریزی ندارید'})
-
     if request.method == 'POST':
         try:
             installment = int(request.POST.get('installment_number'))
@@ -332,7 +324,6 @@ def payment_create_ajax(request):
             payment_date = parse_date(request.POST.get('payment_date'))
             due_date_obj = ApprovedPaymentDate.objects.filter(installment_number=installment).first()
             due_date_val = due_date_obj.due_date if due_date_obj else None
-
             payment = Payment.objects.create(
                 user=request.user,
                 installment_number=installment,
@@ -340,9 +331,7 @@ def payment_create_ajax(request):
                 payment_date=payment_date,
                 due_date=due_date_val
             )
-
             total_score, _ = calculate_total_score(request.user)
-
             return JsonResponse({
                 'status': 'success',
                 'message': '✅ واریزی ثبت شد',
@@ -355,39 +344,28 @@ def payment_create_ajax(request):
                 },
                 'total_score': total_score
             })
-
         except Exception as e:
             return JsonResponse({'status': 'error', 'message': str(e)})
-
     return JsonResponse({'status': 'error', 'message': 'درخواست نامعتبر ❌'})
-
 
 @csrf_exempt
 @login_required
 def payment_edit_ajax(request, pk):
-    if not has_finance_access(request.user):
-        return JsonResponse({'status': 'error', 'message': '⛔ شما دسترسی ویرایش واریزی ندارید'})
-
     if request.method == 'POST':
         try:
             payment = get_object_or_404(Payment, pk=pk, user=request.user)
             field = request.POST.get('field')
             value = request.POST.get('value')
-
             if field == 'installment_number':
                 payment.installment_number = int(value)
                 due_date_obj = ApprovedPaymentDate.objects.filter(installment_number=value).first()
                 payment.due_date = due_date_obj.due_date if due_date_obj else None
-
             elif field == 'amount':
                 payment.amount = int(float(value))
-
             elif field == 'payment_date':
                 payment.payment_date = parse_date(value)
-
             payment.save()
             total_score, _ = calculate_total_score(request.user)
-
             return JsonResponse({
                 'status': 'success',
                 'message': '✅ ویرایش انجام شد',
@@ -396,30 +374,18 @@ def payment_edit_ajax(request, pk):
                 'due_date': to_jalali(payment.due_date),
                 'total_score': total_score
             })
-
         except Exception as e:
             return JsonResponse({'status': 'error', 'message': str(e)})
-
     return JsonResponse({'status': 'error', 'message': 'درخواست نامعتبر ❌'})
-
 
 @csrf_exempt
 @login_required
 def payment_delete_ajax(request, pk):
-    if not has_finance_access(request.user):
-        return JsonResponse({'status': 'error', 'message': '⛔ شما دسترسی حذف واریزی ندارید'})
-
     if request.method == 'POST':
         payment = get_object_or_404(Payment, pk=pk, user=request.user)
         payment.delete()
         total_score, _ = calculate_total_score(request.user)
-
-        return JsonResponse({
-            'status': 'success',
-            'message': '🗑️ واریزی حذف شد',
-            'total_score': total_score
-        })
-
+        return JsonResponse({'status': 'success', 'message': '🗑️ واریزی حذف شد', 'total_score': total_score})
     return JsonResponse({'status': 'error', 'message': 'درخواست نامعتبر ❌'})
 
 @login_required

@@ -1,10 +1,12 @@
 from django.shortcuts import render, redirect, get_object_or_404
 from django.contrib.auth.decorators import login_required, user_passes_test
 from django.contrib.auth.views import LoginView
-from django.contrib.auth import login
+from django.contrib.auth import login,logout
 from django.contrib import messages
 from django.contrib.auth.models import User
 from django.http import JsonResponse,HttpResponse
+from django.db import transaction, IntegrityError
+from django.utils.dateparse import parse_date
 from django.views.decorators.csrf import csrf_exempt
 from .models import Profile, Payment, ApprovedPaymentDate
 from .forms import ProfileForm, UserUpdateForm, PaymentForm
@@ -18,6 +20,8 @@ from openpyxl import load_workbook
 from datetime import date
 import jdatetime
 import logging
+
+
 
 logger = logging.getLogger(__name__)
 
@@ -59,19 +63,19 @@ def calculate_total_score(user):
         else:
             diff_days = 0
         
-        score = (diff_days * float(p.amount)) / 100_000_000
+        score = (diff_days * int(p.amount)) / 100_000_000
         total_score += score
-        
+
         payments_data.append({
             'id': p.id,
             'installment_number': p.installment_number,
-            'amount': p.amount,
+            'amount': f"{int(p.amount):,}",  # ← جداکننده هزارگان
             'payment_date': p.payment_date,
             'payment_date_j': to_jalali(p.payment_date),
             'due_date': p.due_date,
             'due_date_j': to_jalali(p.due_date),
             'diff_days': diff_days,
-            'score': score
+            'score': round(score, 2)
         })
     return total_score, payments_data
 
@@ -86,6 +90,22 @@ def dashboard(request):
     total_score, payments_data = calculate_total_score(user)
     approved_dates_list = {p.installment_number: p.due_date for p in approved_dates}
 
+    # ----------------- محاسبه رتبه -----------------
+    users = User.objects.all()
+    scores = []
+    for u in users:
+        score, _ = calculate_total_score(u)
+        scores.append((u.id, score))
+    scores.sort(key=lambda x: x[1], reverse=True)
+
+    user_rank = None
+    rank = 1
+    for uid, score in scores:
+        if uid == user.id:
+            user_rank = rank
+            break
+        rank += 1
+
     context = {
         'user': user,
         'profile': profile,
@@ -93,18 +113,20 @@ def dashboard(request):
         'approved_dates': approved_dates_list,
         'installments': [d.installment_number for d in ApprovedPaymentDate.objects.all().order_by('installment_number')],
         'active_tab': request.GET.get('tab', 'personal'),
-        'total_score': total_score
+        'total_score': total_score,
+        "rank": user_rank
     }
     return render(request, 'accounts/dashboard.html', context)
 
 # ---------------------- AJAX ثبت واریزی ----------------------
+# ثبت واریزی
 @csrf_exempt
 @login_required
 def payment_create_ajax(request):
     if request.method == 'POST':
         try:
             installment = int(request.POST.get('installment_number'))
-            amount = int(request.POST.get('amount'))
+            amount = int(float(request.POST.get('amount', 0)))  # ← تبدیل به int
             payment_date = parse_date(request.POST.get('payment_date'))
             due_date_obj = ApprovedPaymentDate.objects.filter(installment_number=installment).first()
             due_date_val = due_date_obj.due_date if due_date_obj else None
@@ -125,7 +147,7 @@ def payment_create_ajax(request):
                 'payment': {
                     'id': payment.id,
                     'installment_number': payment.installment_number,
-                    'amount': payment.amount,
+                    'amount': f"{payment.amount:,}",  # ← جداکننده هزارگان
                     'payment_date': to_jalali(payment.payment_date),
                     'due_date': to_jalali(payment.due_date)
                 },
@@ -135,7 +157,7 @@ def payment_create_ajax(request):
             return JsonResponse({'status': 'error', 'message': str(e)})
     return JsonResponse({'status': 'error', 'message': 'درخواست نامعتبر ❌'})
 
-# ---------------------- AJAX ویرایش واریزی ----------------------
+# ویرایش واریزی
 @csrf_exempt
 @login_required
 def payment_edit_ajax(request, pk):
@@ -150,7 +172,7 @@ def payment_edit_ajax(request, pk):
                 due_date_obj = ApprovedPaymentDate.objects.filter(installment_number=value).first()
                 payment.due_date = due_date_obj.due_date if due_date_obj else None
             elif field == 'amount':
-                payment.amount = int(value)
+                payment.amount = int(float(value))  # ← همیشه int
             elif field == 'payment_date':
                 payment.payment_date = parse_date(value)
 
@@ -160,6 +182,7 @@ def payment_edit_ajax(request, pk):
             return JsonResponse({
                 'status': 'success',
                 'message': '✅ ویرایش انجام شد',
+                'amount': f"{payment.amount:,}",  # ← جداکننده هزارگان
                 'payment_date': to_jalali(payment.payment_date),
                 'due_date': to_jalali(payment.due_date),
                 'total_score': total_score
@@ -186,7 +209,7 @@ def score_ajax(request):
     payments_json = [
         {
             'installment_number': p['installment_number'],
-            'amount': f"{p['amount']:,}",
+            'amount': int(p.amount),
             'payment_date': p['payment_date_j'],
             'due_date': p['due_date_j'],
             'diff_days': p['diff_days'],
@@ -326,14 +349,80 @@ def fix_excel_date(value):
 
 # ---------------------- آپلود و پردازش اکسل ----------------------
 
+
+# =====================================================
+# Helper function: safe get_or_create profile
+# =====================================================
+def get_or_create_profile_safe(user, phone, bc, nc):
+    """
+    ۱۰۰٪ ضد IntegrityError
+    - اگر Profile وجود ندارد → ایجاد می‌شود
+    - اگر وجود دارد → آپدیت می‌شود
+    """
+    try:
+        profile, created = Profile.objects.get_or_create(
+            user=user,
+            defaults={
+                "phone_number": phone,
+                "birth_certificate": bc,
+                "national_code": nc
+            }
+        )
+
+        updated = False
+        if profile.phone_number != phone:
+            profile.phone_number = phone
+            updated = True
+        if profile.birth_certificate != bc:
+            profile.birth_certificate = bc
+            updated = True
+        if profile.national_code != nc:
+            profile.national_code = nc
+            updated = True
+
+        if updated:
+            profile.save()
+
+        return profile
+
+    except IntegrityError:
+        # اگر به هر دلیلی در همان لحظه پروفایل دیگری ساخته شد
+        return Profile.objects.get(user=user)
+
+
+
+# ================== تمیز کردن کدملی از کوتیشن و صفرهای اضافی ==================
+def clean_national_code(raw_nc):
+    if not raw_nc:
+        return ""
+    s = str(raw_nc).strip()
+    # حذف کوتیشن تک یا دابل (که اکسل خودش می‌ذاره)
+    s = s.strip("'\"")
+    # فقط اعداد رو نگه دار (در صورت وجود حروف فارسی یا فاصله)
+    s = ''.join(filter(str.isdigit, s))
+    # اگر خالی شد یا همه صفر بود
+    if not s:
+        return ""
+    # حذف صفرهای ابتدایی اضافی و نگه داشتن دقیقاً ۱۰ رقم آخر
+    s = s.lstrip('0')
+    if not s:  # مثلاً 0000000000
+        s = "0"
+    # دقیقاً ۱۰ رقم، با صفر پر کردن از چپ
+    return s[-10:].zfill(10)
+# =====================================================
+# Main view
+# =====================================================
+@transaction.atomic
+@login_required
 def upload_members_and_payments(request):
+
     if request.method == "POST" and request.FILES.get("excel_file"):
         excel_file = request.FILES["excel_file"]
 
         try:
             wb = load_workbook(excel_file, data_only=True)
             sheet = wb.active
-        except Exception:
+        except:
             messages.error(request, "❌ خطا در باز کردن فایل. لطفاً فایل اکسل معتبر بارگذاری کنید.")
             return redirect("upload_members_and_payments")
 
@@ -348,96 +437,150 @@ def upload_members_and_payments(request):
             messages.error(request, f"❌ ستون‌های زیر در فایل وجود ندارند: {', '.join(missing_headers)}")
             return redirect("upload_members_and_payments")
 
-        added_users = 0
-        added_payments = 0
+        rows = []
+        national_codes = set()
+        installment_set = set()
 
+        # --------------------------
+        # Collect rows in memory
+        # --------------------------
         for row in sheet.iter_rows(min_row=2, values_only=True):
             data = dict(zip(headers, row))
 
-            first_name = str(data.get("نام", "")).strip()
-            last_name = str(data.get("نام خانوادگی", "")).strip()
-            national_code = str(data.get("کد ملی", "")).strip()
-            phone = str(data.get("شماره همراه", "")).strip()
-            email = str(data.get("ایمیل", "")).strip()
-            birth_certificate = str(data.get("شماره شناسنامه", "")).strip()
-
-            installment_number = data.get("نوبت واریزی")
-            payment_date = parse_date(data.get("تاریخ واریز"))
-            amount = data.get("مبلغ واریزی")
-
-            if not national_code:
+            raw_nc = data.get("کد ملی")
+            nc = clean_national_code(raw_nc)
+            
+            if not nc or len(nc) != 10:  # کدملی باید دقیقاً ۱۰ رقم باشد
+                messages.warning(request, f"ردیف نادیده گرفته شد: کدملی نامعتبر → {raw_nc}")
                 continue
 
-            # ---------------------- ایجاد/آپدیت کاربر ----------------------
-            user, created = User.objects.get_or_create(username=national_code)
+            first = str(data.get("نام") or "").strip()
+            last = str(data.get("نام خانوادگی") or "").strip()
+            phone = str(data.get("شماره همراه") or "").strip()
+            email = str(data.get("ایمیل") or "").strip()
+            bc = str(data.get("شماره شناسنامه") or "").strip()
 
-            if created:
-                user.first_name = first_name
-                user.last_name = last_name
-                user.email = email
-                user.set_password(national_code)  # ✅ رمز عبور = کد ملی
-                user.save()
+            inst = data.get("نوبت واریز")
+            pay_dt = parse_date(data.get("تاریخ واریز"))
+            amt = data.get("مبلغ واریزی")
+
+            try:
+                inst = int(inst)
+                installment_set.add(inst)
+            except:
+                inst = None
+
+            rows.append({
+                "national_code": nc,
+                "first_name": first,
+                "last_name": last,
+                "phone": phone,
+                "email": email,
+                "birth_certificate": bc,
+                "installment_number": inst,
+                "payment_date": pay_dt,
+                "amount": amt,
+            })
+            national_codes.add(nc)
+
+        if not rows:
+            messages.warning(request, "هیچ رکورد معتبری در فایل یافت نشد.")
+            return redirect("upload_members_and_payments")
+
+        # ---------------------------------------
+        # Fetch existing data
+        # ---------------------------------------
+        users_dict = {u.username: u for u in User.objects.filter(username__in=national_codes)}
+
+        approved_map = {
+            a.installment_number: a
+            for a in ApprovedPaymentDate.objects.filter(installment_number__in=installment_set)
+        }
+
+        # missing installments
+        missing_inst = [i for i in installment_set if i not in approved_map]
+        if missing_inst:
+            ApprovedPaymentDate.objects.bulk_create(
+                [ApprovedPaymentDate(installment_number=i, due_date=None) for i in missing_inst]
+            )
+            for a in ApprovedPaymentDate.objects.filter(installment_number__in=missing_inst):
+                approved_map[a.installment_number] = a
+
+        # existing payments
+        existing_payments_set = set(
+            Payment.objects.filter(
+                user__username__in=national_codes,
+                installment_number__in=installment_set
+            ).values_list(
+                "user__username", "installment_number", "payment_date", "amount"
+            )
+        )
+
+        new_payments = []
+        added_users = 0
+        added_payments = 0
+
+        # =========================================
+        # MAIN LOOP
+        # =========================================
+        for r in rows:
+            nc = r["national_code"]
+
+            # -----------------------------
+            # USER
+            # -----------------------------
+            user = users_dict.get(nc)
+            if not user:
+                user = User.objects.create_user(
+                    username=nc,
+                    password=nc,
+                    first_name=r["first_name"],
+                    last_name=r["last_name"],
+                    email=r["email"],
+                )
+                users_dict[nc] = user
                 added_users += 1
-            else:
-                updated = False
-                if user.first_name != first_name:
-                    user.first_name = first_name
-                    updated = True
-                if user.last_name != last_name:
-                    user.last_name = last_name
-                    updated = True
-                if user.email != email:
-                    user.email = email
-                    updated = True
-                if updated:
-                    user.save()
 
-            # ---------------------- ایجاد/آپدیت پروفایل ----------------------
-            Profile.objects.update_or_create(
+            # -----------------------------
+            # PROFILE (SAFE)
+            # -----------------------------
+            profile = get_or_create_profile_safe(
                 user=user,
-                defaults={
-                    "phone_number": phone,
-                    "birth_certificate": birth_certificate,
-                    "national_code": national_code,
-                },
+                phone=r["phone"],
+                bc=r["birth_certificate"],
+                nc=nc
             )
 
-            # ---------------------- ثبت واریزی با جلوگیری از تکراری ----------------------
-            if installment_number and payment_date and amount:
-                installment_number = int(installment_number)
+            # -----------------------------
+            # PAYMENT
+            # -----------------------------
+            inst = r["installment_number"]
+            pay_dt = r["payment_date"]
+            amt = r["amount"]
 
-                # جلوگیری از ثبت رکورد تکراری کامل
-                exists_same = Payment.objects.filter(
-                    user=user,
-                    installment_number=installment_number,
-                    payment_date=payment_date,
-                    amount=amount
-                ).exists()
+            if inst and pay_dt and amt:
+                key = (nc, inst, pay_dt, amt)
+                if key not in existing_payments_set:
+                    due_val = approved_map.get(inst).due_date if approved_map.get(inst) else None
+                    new_payments.append(
+                        Payment(
+                            user=user,
+                            installment_number=inst,
+                            payment_date=pay_dt,
+                            amount=amt,
+                            due_date=due_val,
+                        )
+                    )
+                    added_payments += 1
 
-                if exists_same:
-                    continue  # رکورد تکراری → ثبت نشود
+        # bulk insert payments only
+        if new_payments:
+            Payment.objects.bulk_create(new_payments, batch_size=500)
 
-                # تاریخ مصوب از مدیریت گرفته می‌شود
-                approved_date_obj, _ = ApprovedPaymentDate.objects.get_or_create(
-                    installment_number=installment_number,
-                    defaults={"due_date": None},
-                )
-
-                Payment.objects.create(
-                    user=user,
-                    installment_number=installment_number,
-                    amount=amount,
-                    payment_date=payment_date,
-                    due_date=approved_date_obj.due_date
-                )
-                added_payments += 1
-
-        msg = (
-            f"✅ فایل با موفقیت پردازش شد. "
-            f"{added_users} کاربر جدید، "
-            f"{added_payments} رکورد واریزی ثبت شد."
+        messages.success(
+            request,
+            f"✅ پردازش موفق: {added_users} کاربر جدید، {added_payments} واریزی جدید ثبت شد."
         )
-        messages.success(request, msg)
         return redirect("upload_members_and_payments")
 
     return render(request, "accounts/upload_members_and_payments.html")
@@ -445,8 +588,78 @@ def upload_members_and_payments(request):
 
 
 # ---------------------- ورود کاربر ----------------------
+from django.contrib.auth.views import LoginView
+from django.contrib import messages
+
 class CustomLoginView(LoginView):
-    template_name = 'accounts/login.html'
+    def get_template_names(self):
+        return [self.template_name]
+
+    def get_success_url(self):
+        user = self.request.user
+
+        # ۱. اگر سوپریوزر است (ادمین اصلی)
+        if user.is_superuser:
+            return '/admin/'
+
+        # ۲. اگر در گروه مدیران آپلود است
+        elif user.groups.filter(name='upload_manager').exists():
+            return '/upload-members/'
+
+        # ۳. در غیر این صورت، کاربر معمولی است
+        else:
+            return '/dashboard/'
+
     def form_valid(self, form):
         messages.success(self.request, f"خوش آمدید {self.request.user.username} 🌷")
         return super().form_valid(form)
+
+
+#-------------------------------------------------------
+def member_score_view(request):
+    users = User.objects.all().prefetch_related('payment_set')
+    
+    scores = []
+
+    for u in users:
+        total_score = 0
+        today = date.today()
+        for p in u.payment_set.all():
+            if p.payment_date and p.due_date:
+                if p.payment_date > p.due_date:
+                    diff_days = (today - p.payment_date).days
+                else:
+                    diff_days = (today - p.due_date).days
+            else:
+                diff_days = 0
+
+            total_score += (diff_days * float(p.amount)) / 100_000_000
+
+        scores.append((u.id, total_score))
+
+    # سورت نزولی
+    scores.sort(key=lambda x: x[1], reverse=True)
+
+    # پیدا کردن رتبه
+    rank = 1
+    user_rank = None
+    for uid, score in scores:
+        if uid == request.user.id:
+            user_rank = rank
+            break
+        rank += 1
+
+    # محاسبه امتیاز کاربر جاری
+    member_total, _ = calculate_total_score(request.user)
+
+    context = {
+        "member": request.user,
+        "total_score": member_total,
+        "rank": user_rank,
+    }
+
+    return render(request, "member_score.html", context)
+
+def logout_view(request):
+    logout(request)
+    return redirect('login')  # بعد از خروج، به صفحه ورود برگردد
